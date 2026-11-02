@@ -1,6 +1,7 @@
 #pragma once
 #include "world.h"
 #include "battle.h"
+#include "overlay.h"
 
 typedef struct {
 	float tx, tz;        /* world point the camera looks at */
@@ -23,5 +24,7 @@ void render_tall_sheet(const uint32_t *rgba); /* TALL_TEX_W x TALL_TEX_H */
 WVert *render_battle_buf(void);               /* 12 vertices: the two Pokémon */
 void render_battle_sheet(const uint32_t *rgba); /* BATTLE_TEX_W x BATTLE_TEX_H */
 
-/* One frame. voxel=false shows the Game Boy picture on the top screen instead. */
-void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, int battle_verts, const Light *light);
+/* One frame. voxel=false shows the Game Boy picture on the top screen instead.
+ * ov (single-screen mode, may be NULL): parts of the Game Boy picture drawn over the 3D. */
+void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, int battle_verts,
+                  const Light *light, const Overlay *ov);

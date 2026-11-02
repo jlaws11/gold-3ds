@@ -32,10 +32,30 @@ addresses it reads are specific to this release.
 | --- | --- |
 | A, B, START, SELECT, D-pad / Circle Pad | Game Boy controls |
 | X | Top screen: 3D world ↔ original picture |
+| Y | Single screen on/off (remembered) |
 | ZL / ZR (New 3DS) | Zoom out / in |
 | 3D slider | Stereoscopic depth |
 
 The camera is fixed behind the player, looking north like the original game.
+
+## Single screen
+
+For playing on one screen: Azahar's Single Screen layout, a Steam Deck or a
+TV. Press **Y** to turn it on (it's remembered in `/3ds/gold3ds/settings.txt`).
+Everything then happens on the top screen:
+
+- Walking around: the 3D world, nothing in the way.
+- Talking and signs: Gold's text box along the bottom at 2x, with YES/NO and
+  other small boxes just above it.
+- The START menu, party, bag, Pokédex and other full-screen menus: the whole
+  Game Boy picture in the middle, with the 3D world dimmed behind.
+- 3D battles: the opponent's HP box top-left, yours on the right, and the
+  text and move menus along the bottom, around the Pokémon in the world.
+- Anywhere else (title screen, battles without FireRed): the Game Boy picture.
+
+The layout is chosen each frame from Gold's own screen buffer, so it follows
+the game without any changes to it. The bottom screen keeps showing the Game
+Boy picture either way.
 
 ## Day and night
 
@@ -77,6 +97,8 @@ bottom screen keeps Gold's own battle screen for moves, HP and text.
   sky and tint; shadows are baked into the mesh by tracing toward the sun.
 - `source/render.c` draws it with citro3d, culled to the squares around the
   player, plus the player and NPC sprites as upright cut-outs.
+- `source/overlay.c` picks the single-screen layout from Gold's screen buffer
+  (`wTilemap`): text box frames, menus and the battle HP boxes.
 - `source/battle.c` stages battles in the world from Gold's battle memory;
   `source/frpics.c` decompresses FireRed's pictures (LZ77, 4bpp) at runtime.
 - Memory addresses come from [pret/pokegold](https://github.com/pret/pokegold)'s symbol file.

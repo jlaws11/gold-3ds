@@ -5,6 +5,8 @@
  *
  * Controls: A/B/START/SELECT/D-pad/Circle Pad as on Game Boy.
  *   X        switch the top screen between 3D and the original picture
+ *   Y        single screen on/off: text, menus and battle boxes shown on the top screen
+ *            (for Azahar's single-screen layout, a Steam Deck or a TV); remembered
  *   ZL / ZR  (New 3DS) zoom out / in
  *   3D slider: stereoscopic depth
  * The camera is fixed: it follows the player from the south, like the original.
@@ -27,11 +29,13 @@
 #include "tallsprite.h"
 #include "frpics.h"
 #include "battle.h"
+#include "overlay.h"
 
 #define APP_DIR  "sdmc:/3ds/gold3ds"
 #define ROM_PATH APP_DIR "/gold.gbc"
 #define SAV_PATH APP_DIR "/gold.sav"
 #define TALL_PATH APP_DIR "/firered.gba"   /* optional: your own FireRed or LeafGreen */
+#define SETTINGS_PATH APP_DIR "/settings.txt"
 
 static uint8_t *load_file(const char *path, size_t *n) {
 	FILE *f = fopen(path, "rb");
@@ -123,6 +127,24 @@ static float approach(float cur, float target) {
 
 static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 
+/* settings.txt: one "name=value" per line */
+static bool load_single_screen(void) {
+	FILE *f = fopen(SETTINGS_PATH, "r");
+	if (!f) return false;
+	char line[64]; bool on = false;
+	while (fgets(line, sizeof line, f)) if (strncmp(line, "single_screen=", 14) == 0) on = line[14] == '1';
+	fclose(f);
+	return on;
+}
+
+static void save_single_screen(bool on) {
+	mkdir(APP_DIR, 0777);
+	FILE *f = fopen(SETTINGS_PATH, "w");
+	if (!f) return;
+	fprintf(f, "single_screen=%d\n", on ? 1 : 0);
+	fclose(f);
+}
+
 int main(void) {
 	gfxInitDefault();
 	gfxSet3D(true);
@@ -165,6 +187,8 @@ int main(void) {
 	Light light;
 	light_compute(12, 0, ENV_OUTDOOR, &light);
 	bool voxel = true;
+	bool single = load_single_screen();   /* everything on the top screen (Azahar single screen, Steam Deck, TV) */
+	Overlay overlay;
 	uint32_t atlas_key = 0, saved_hash = core_sram_hash(), last_hash = saved_hash;
 	unsigned frame = 0;
 
@@ -183,6 +207,7 @@ int main(void) {
 		if (held & KEY_RIGHT)  b |= BTN_RIGHT;
 
 		if (down & KEY_X) voxel = !voxel;
+		if (down & KEY_Y) { single = !single; save_single_screen(single); }
 		if (held & KEY_ZL) zoom = fminf(320, zoom + 2);
 		if (held & KEY_ZR) zoom = fmaxf(130, zoom - 2);
 
@@ -251,7 +276,8 @@ int main(void) {
 
 		render_lcd(core_lcd());
 		bool show3d = voxel && (overworld || battle.active) && mesh->count > 0;
-		render_frame(show3d, &cam, nspr, nshadow, nplayer, nbattle, &light);
+		if (single) overlay_plan(&g, overworld, battle.active, &overlay);
+		render_frame(show3d, &cam, nspr, nshadow, nplayer, nbattle, &light, single ? &overlay : NULL);
 
 		/* save once the game's save data has changed and then stayed still for 2 seconds */
 		if (++frame % 120 == 0) {

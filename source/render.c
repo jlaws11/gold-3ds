@@ -5,6 +5,7 @@
 #include "render.h"
 #include "scene_shbin.h"
 #include "tallsprite.h"
+#include "overlay.h"
 
 #define DISPLAY_TRANSFER_FLAGS \
 	(GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
@@ -18,9 +19,10 @@ static C3D_RenderTarget *top_l, *top_r, *bottom;
 static DVLB_s *dvlb;
 static shaderProgram_s prog;
 static int u_proj, u_mv, u_amb, u_glow;
-static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob, tex_tall, tex_battle;
+static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob, tex_tall, tex_battle, tex_dim;
 static WorldMesh mesh;
-static WVert *spr, *shadows, *player, *battle_q, *screen_quads;
+static WVert *spr, *shadows, *player, *battle_q, *screen_quads, *ov_quads;
+static int ov_flip;
 static uint32_t *lcd_rgba;
 
 /* PICA200 textures are stored in 8x8 tiles with Morton (Z-order) texels. */
@@ -90,6 +92,12 @@ void render_init(void) {
 	tex_new(&tex_blob, 16, 16);
 	tex_new(&tex_tall, TALL_TEX_W, TALL_TEX_H);
 	tex_new(&tex_battle, BATTLE_TEX_W, BATTLE_TEX_H);
+	tex_new(&tex_dim, 8, 8);
+	{   /* translucent black, to darken the 3D behind a full-screen menu */
+		static uint32_t dim[64];
+		for (int i = 0; i < 64; i++) dim[i] = RGBA(0, 0, 0, 150);
+		upload(&tex_dim, dim, 8, 8, 8);
+	}
 	{   /* soft round shadow, darkest in the middle */
 		static uint32_t blob[16 * 16];
 		for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) {
@@ -109,6 +117,7 @@ void render_init(void) {
 	player = linearAlloc(sizeof(WVert) * 6);
 	battle_q = linearAlloc(sizeof(WVert) * 12);
 	screen_quads = linearAlloc(sizeof(WVert) * 12);
+	ov_quads = linearAlloc(sizeof(WVert) * 2 * 30);   /* double-buffered: written while the GPU may read the other half */
 	lcd_rgba = linearAlloc(160 * 144 * 4);
 	/* Game Boy picture at 1.5x: 240x216, centred on each screen */
 	set_quad(screen_quads,     80, 12, 320, 228, 160 / 256.0f, 144 / 256.0f);
@@ -117,7 +126,7 @@ void render_init(void) {
 }
 
 void render_exit(void) {
-	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob); C3D_TexDelete(&tex_tall); C3D_TexDelete(&tex_battle); linearFree(player); linearFree(battle_q);
+	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob); C3D_TexDelete(&tex_tall); C3D_TexDelete(&tex_battle); C3D_TexDelete(&tex_dim); linearFree(ov_quads); linearFree(player); linearFree(battle_q);
 	linearFree(mesh.verts); linearFree(spr); linearFree(shadows); linearFree(screen_quads); linearFree(lcd_rgba);
 	shaderProgramFree(&prog);
 	DVLB_Free(dvlb);
@@ -217,8 +226,58 @@ static void draw_picture(bool top) {
 	C3D_DrawArrays(GPU_TRIANGLES, top ? 0 : 6, 6);
 }
 
-void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, int battle_verts, const Light *L) {
+static void quad_uv(WVert *q, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1) {
+	WVert v[6] = {
+		{ x0, y0, 0, u0, v0, 1, 0 }, { x0, y1, 0, u0, v1, 1, 0 }, { x1, y1, 0, u1, v1, 1, 0 },
+		{ x0, y0, 0, u0, v0, 1, 0 }, { x1, y1, 0, u1, v1, 1, 0 }, { x1, y0, 0, u1, v0, 1, 0 },
+	};
+	memcpy(q, v, sizeof v);
+}
+
+/* Game Boy picture regions over the top screen (single-screen mode) */
+static int build_overlay(const Overlay *ov, WVert *q, bool *dim) {
+	int n = 0;
+	*dim = ov && ov->dim;
+	if (!ov) return 0;
+	if (ov->dim) { quad_uv(q, 0, 0, 400, 240, 0, 0, 1, 1); n += 6; }
+	for (int i = 0; i < ov->n; i++, n += 6) {
+		const OverlayRect *r = &ov->r[i];
+		quad_uv(q + n, r->dx, r->dy, r->dx + r->dw, r->dy + r->dh,
+		        r->sx / 256.0f, r->sy / 256.0f, (r->sx + r->sw) / 256.0f, (r->sy + r->sh) / 256.0f);
+	}
+	return n;
+}
+
+static void draw_overlay(WVert *q, int n, bool dim) {
+	if (n == 0) return;
+	C3D_Mtx proj, id;
+	Mtx_OrthoTilt(&proj, 0.0f, 400.0f, 240.0f, 0.0f, 1.0f, -1.0f, true);
+	Mtx_Identity(&id);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_mv, &id);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_amb, 1, 1, 1, 1);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_glow, 0, 0, 0, 0);
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	use_buffer(q);
+	int first = 0;
+	if (dim) {
+		C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		C3D_TexBind(0, &tex_dim);
+		C3D_DrawArrays(GPU_TRIANGLES, 0, 6);
+		C3D_AlphaTest(true, GPU_GREATER, 0x80);
+		first = 6;
+	}
+	C3D_TexBind(0, &tex_lcd);
+	C3D_DrawArrays(GPU_TRIANGLES, first, n - first);
+}
+
+void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, int battle_verts, const Light *L, const Overlay *ov) {
 	uint32_t sky = L->sky;
+	ov_flip ^= 1;
+	WVert *oq = ov_quads + ov_flip * 30;
+	bool dim;
+	int ovn = voxel ? build_overlay(ov, oq, &dim) : 0;
+	if (ovn) GSPGPU_FlushDataCache(oq, sizeof(WVert) * ovn);
 	if (sprite_verts > 0) GSPGPU_FlushDataCache(spr, sizeof(WVert) * sprite_verts);
 	if (shadow_verts > 0) GSPGPU_FlushDataCache(shadows, sizeof(WVert) * shadow_verts);
 	if (player_verts > 0) GSPGPU_FlushDataCache(player, sizeof(WVert) * player_verts);
@@ -229,10 +288,12 @@ void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_ve
 		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, sky, 0);
 		C3D_FrameDrawOn(top_l);
 		draw_world(cam, -iod, sprite_verts, shadow_verts, player_verts, battle_verts, L);
+		draw_overlay(oq, ovn, dim);
 		if (iod > 0.0f) {
 			C3D_RenderTargetClear(top_r, C3D_CLEAR_ALL, sky, 0);
 			C3D_FrameDrawOn(top_r);
 			draw_world(cam, iod, sprite_verts, shadow_verts, player_verts, battle_verts, L);
+			draw_overlay(oq, ovn, dim);
 		}
 	} else {
 		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, 0x101218FF, 0);
