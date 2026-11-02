@@ -16,10 +16,10 @@
 static C3D_RenderTarget *top_l, *top_r, *bottom;
 static DVLB_s *dvlb;
 static shaderProgram_s prog;
-static int u_proj, u_mv;
-static C3D_Tex tex_bg, tex_obj, tex_lcd;
+static int u_proj, u_mv, u_amb, u_glow;
+static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob;
 static WorldMesh mesh;
-static WVert *spr, *screen_quads;
+static WVert *spr, *shadows, *screen_quads;
 static uint32_t *lcd_rgba;
 
 /* PICA200 textures are stored in 8x8 tiles with Morton (Z-order) texels. */
@@ -45,8 +45,8 @@ static void tex_new(C3D_Tex *t, int w, int h) {
 
 static void set_quad(WVert *q, float x0, float y0, float x1, float y1, float u1, float v1) {
 	WVert v[6] = {
-		{ x0, y0, 0, 0,  0,  1 }, { x0, y1, 0, 0,  v1, 1 }, { x1, y1, 0, u1, v1, 1 },
-		{ x0, y0, 0, 0,  0,  1 }, { x1, y1, 0, u1, v1, 1 }, { x1, y0, 0, u1, 0,  1 },
+		{ x0, y0, 0, 0,  0,  1, 0 }, { x0, y1, 0, 0,  v1, 1, 0 }, { x1, y1, 0, u1, v1, 1, 0 },
+		{ x0, y0, 0, 0,  0,  1, 0 }, { x1, y1, 0, u1, v1, 1, 0 }, { x1, y0, 0, u1, 0,  1, 0 },
 	};
 	memcpy(q, v, sizeof v);
 }
@@ -66,12 +66,14 @@ void render_init(void) {
 	C3D_BindProgram(&prog);
 	u_proj = shaderInstanceGetUniformLocation(prog.vertexShader, "projection");
 	u_mv   = shaderInstanceGetUniformLocation(prog.vertexShader, "modelView");
+	u_amb  = shaderInstanceGetUniformLocation(prog.vertexShader, "ambient");
+	u_glow = shaderInstanceGetUniformLocation(prog.vertexShader, "glowClr");
 
 	C3D_AttrInfo *ai = C3D_GetAttrInfo();
 	AttrInfo_Init(ai);
 	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3);   /* position */
 	AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 2);   /* texcoord */
-	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 1);   /* shade */
+	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);   /* shade, glow */
 
 	C3D_TexEnv *env = C3D_GetTexEnv(0);
 	C3D_TexEnvInit(env);
@@ -79,15 +81,28 @@ void render_init(void) {
 	C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
 	C3D_AlphaTest(true, GPU_GREATER, 0x80);
 	C3D_CullFace(GPU_CULL_NONE);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
 
 	tex_new(&tex_bg, 128, 128);
 	tex_new(&tex_obj, 128, 128);
 	tex_new(&tex_lcd, 256, 256);
+	tex_new(&tex_blob, 16, 16);
+	{   /* soft round shadow, darkest in the middle */
+		static uint32_t blob[16 * 16];
+		for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) {
+			float dx = (x - 7.5f) / 8.0f, dy = (y - 7.5f) / 8.0f, r = sqrtf(dx * dx + dy * dy);
+			float a = r >= 1 ? 0 : (1 - r * r) * 0.55f;
+			blob[y * 16 + x] = RGBA(0, 0, 0, (int)(a * 255));
+		}
+		C3D_TexSetFilter(&tex_blob, GPU_LINEAR, GPU_LINEAR);
+		upload(&tex_blob, blob, 16, 16, 16);
+	}
 
 	mesh.cap = MESH_CAP;
 	mesh.verts = linearAlloc(sizeof(WVert) * MESH_CAP);
 	mesh.count = 0; mesh.sq_w = mesh.sq_h = 0; mesh.key = 0;
 	spr = linearAlloc(sizeof(WVert) * SPRITE_CAP);
+	shadows = linearAlloc(sizeof(WVert) * SPRITE_CAP);
 	screen_quads = linearAlloc(sizeof(WVert) * 12);
 	lcd_rgba = linearAlloc(160 * 144 * 4);
 	/* Game Boy picture at 1.5x: 240x216, centred on each screen */
@@ -97,8 +112,8 @@ void render_init(void) {
 }
 
 void render_exit(void) {
-	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd);
-	linearFree(mesh.verts); linearFree(spr); linearFree(screen_quads); linearFree(lcd_rgba);
+	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob);
+	linearFree(mesh.verts); linearFree(spr); linearFree(shadows); linearFree(screen_quads); linearFree(lcd_rgba);
 	shaderProgramFree(&prog);
 	DVLB_Free(dvlb);
 	C3D_Fini();
@@ -109,6 +124,7 @@ void render_mesh_uploaded(void) { GSPGPU_FlushDataCache(mesh.verts, sizeof(WVert
 void render_bg_atlas(const uint32_t *rgba) { upload(&tex_bg, rgba, 128, 128, 128); }
 void render_obj_atlas(const uint32_t *rgba) { upload(&tex_obj, rgba, 128, 128, 128); }
 WVert *render_sprite_buf(int *cap) { *cap = SPRITE_CAP; return spr; }
+WVert *render_shadow_buf(int *cap) { *cap = SPRITE_CAP; return shadows; }
 
 void render_lcd(const uint8_t *lcd) {
 	/* soft cream-to-ink ramp until the colour core lands */
@@ -124,28 +140,40 @@ static void use_buffer(WVert *base) {
 	BufInfo_Add(bi, base, sizeof(WVert), 3, 0x210);
 }
 
-static void draw_world(const Camera *cam, float iod, int sprite_verts) {
+static void draw_world(const Camera *cam, float iod, int sprite_verts, int shadow_verts, const Light *L) {
 	C3D_Mtx proj, mv;
 	float focal = cam->dist;
 	Mtx_PerspStereoTilt(&proj, C3D_AngleFromDegrees(42.0f), C3D_AspectRatioTop, 6.0f, 1600.0f, iod, focal, false);
 	float tx = cam->x + 8, tz = cam->z + 8, ty = 6;
-	float ex = tx + sinf(cam->yaw) * cosf(cam->pitch) * cam->dist;
+	float ex = tx;
 	float ey = ty + sinf(cam->pitch) * cam->dist;
-	float ez = tz + cosf(cam->yaw) * cosf(cam->pitch) * cam->dist;
+	float ez = tz + cosf(cam->pitch) * cam->dist;
 	Mtx_LookAt(&mv, FVec3_New(ex, ey, ez), FVec3_New(tx, ty, tz), FVec3_New(0, 1, 0), false);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_mv, &mv);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_amb, L->ambient[0], L->ambient[1], L->ambient[2], 1.0f);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_glow, L->glow[0], L->glow[1], L->glow[2], 0.0f);
 	C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+	C3D_AlphaTest(true, GPU_GREATER, 0x80);
 
 	/* only the squares around the player: whole rows of the grid are contiguous */
 	C3D_TexBind(0, &tex_bg);
 	use_buffer(mesh.verts);
 	int gx = (int)floorf(cam->x / 16) + mesh.origin, gy = (int)floorf(cam->z / 16) + mesh.origin;
-	int spread = 15 + (int)(cam->dist / 60);
-	for (int y = gy - spread; y <= gy + 8; y++) {
+	int spread = 14 + (int)(cam->dist / 60);
+	for (int y = gy - spread - 4; y <= gy + 7; y++) {
 		int first, count;
 		world_row_range(&mesh, y, gx - spread, gx + spread, &first, &count);
 		if (count > 0) C3D_DrawArrays(GPU_TRIANGLES, first, count);
+	}
+	if (shadow_verts > 0) {   /* blended, no depth write, drawn before the sprites */
+		C3D_TexBind(0, &tex_blob);
+		use_buffer(shadows);
+		C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
+		C3D_DrawArrays(GPU_TRIANGLES, 0, shadow_verts);
+		C3D_AlphaTest(true, GPU_GREATER, 0x80);
+		C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
 	}
 	if (sprite_verts > 0) {
 		C3D_TexBind(0, &tex_obj);
@@ -160,24 +188,28 @@ static void draw_picture(bool top) {
 	Mtx_Identity(&id);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_mv, &id);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_amb, 1, 1, 1, 1);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_glow, 0, 0, 0, 0);
 	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
 	C3D_TexBind(0, &tex_lcd);
 	use_buffer(screen_quads);
 	C3D_DrawArrays(GPU_TRIANGLES, top ? 0 : 6, 6);
 }
 
-void render_frame(bool voxel, const Camera *cam, int sprite_verts, uint32_t sky) {
+void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, const Light *L) {
+	uint32_t sky = L->sky;
 	if (sprite_verts > 0) GSPGPU_FlushDataCache(spr, sizeof(WVert) * sprite_verts);
+	if (shadow_verts > 0) GSPGPU_FlushDataCache(shadows, sizeof(WVert) * shadow_verts);
 	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 	if (voxel) {
 		float iod = osGet3DSliderState() * cam->dist / 24.0f;
 		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, sky, 0);
 		C3D_FrameDrawOn(top_l);
-		draw_world(cam, -iod, sprite_verts);
+		draw_world(cam, -iod, sprite_verts, shadow_verts, L);
 		if (iod > 0.0f) {
 			C3D_RenderTargetClear(top_r, C3D_CLEAR_ALL, sky, 0);
 			C3D_FrameDrawOn(top_r);
-			draw_world(cam, iod, sprite_verts);
+			draw_world(cam, iod, sprite_verts, shadow_verts, L);
 		}
 	} else {
 		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, 0x101218FF, 0);

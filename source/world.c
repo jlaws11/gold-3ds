@@ -1,5 +1,6 @@
 #include "world.h"
 #include <string.h>
+#include <math.h>
 
 enum { CL_GROUND, CL_GRASS, CL_WATER, CL_TREE, CL_ROOF, CL_SOLID, CL_DOOR, CL_LEDGE };
 enum { PAL_GRAY, PAL_RED, PAL_GREEN, PAL_WATER, PAL_YELLOW, PAL_BROWN, PAL_ROOF, PAL_TEXT };
@@ -96,58 +97,118 @@ uint32_t world_key(const GoldView *g) {
 	return h;
 }
 
+/* ---- scene state shared by the build helpers ------------------------------ */
+
+static uint8_t cls[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W];
+static short hgt[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W];
+static uint8_t tiles[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W][4];
+static short bld_id[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W];
+static Bld blds[MAX_BLD];
+static short fill_stack[WORLD_MAX_SQ_W * WORLD_MAX_SQ_H][2];
+static int GW, GH, GO;                 /* grid size and origin of the current build */
+static const Light *LT;
+static float sun_h[2], sun_slope;      /* horizontal sun direction and rise per pixel */
+
+/* Building shape, shared by geometry and shadows. */
+typedef struct { float zb, zf, half, wall_h, rise; int roof_tiles, wall_tiles; } BShape;
+static BShape bshape(const Bld *b) {
+	BShape s;
+	s.roof_tiles = (b->y1 - b->y0 + 1) * 2; s.wall_tiles = (b->wy1 - b->y1) * 2;
+	s.zb = (b->y0 - GO) * 16.0f; s.zf = (b->wy1 + 1 - GO) * 16.0f;
+	s.half = (s.zf - s.zb) / 2; s.wall_h = s.wall_tiles * 8.0f; s.rise = s.half * 0.6f;
+	return s;
+}
+
+/* Height of the world surface at a point (world pixels). */
+static float height_at(float x, float z) {
+	int gx = (int)floorf(x / 16) + GO, gy = (int)floorf(z / 16) + GO;
+	if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) return 0;
+	if (hgt[gy][gx] != H_BUILDING) return hgt[gy][gx];
+	BShape s = bshape(&blds[bld_id[gy][gx]]);
+	float d = s.zf - z;
+	if (d < 0) return 0;
+	float t = d <= s.half ? d / s.half : (2 * s.half - d) / s.half;
+	return s.wall_h + s.rise * (t < 0 ? 0 : t);
+}
+
+/* Is this point in the shadow of something between it and the sun? */
+static bool in_shadow(float x, float y, float z) {
+	if (sun_slope > 20.0f) return false;     /* sun almost overhead */
+	for (float t = 2.0f; t <= 120.0f; t += 3.0f) {
+		float py = y + 0.6f + sun_slope * t;
+		if (py > 60.0f) return false;          /* above anything in the world */
+		if (height_at(x + sun_h[0] * t, z + sun_h[1] * t) > py) return true;
+	}
+	return false;
+}
+
+/* Diffuse light for a face normal. */
+static float lambert(float nx, float ny, float nz) {
+	float d = nx * LT->sun[0] + ny * LT->sun[1] + nz * LT->sun[2];
+	return 0.60f + 0.40f * (d > 0 ? d : 0);
+}
+
 /* ---- vertex emission ------------------------------------------------- */
 
 typedef struct { float x, y, z; } P3;
 
 static bool room(WorldMesh *m, int n) { return m->count + n <= m->cap; }
 
-static void put(WorldMesh *m, P3 p, float u, float v, float s) {
+static void put(WorldMesh *m, P3 p, float u, float v, float s, float glow) {
 	WVert *o = &m->verts[m->count++];
-	o->x = p.x; o->y = p.y; o->z = p.z; o->u = u; o->v = v; o->shade = s;
+	o->x = p.x; o->y = p.y; o->z = p.z; o->u = u; o->v = v; o->shade = s; o->glow = glow;
 }
 
-/* a=top-left b=top-right c=bottom-right d=bottom-left (as the tile is drawn) */
-static void quad(WorldMesh *m, P3 a, P3 b, P3 c, P3 d, int tile, float shade) {
+/* a=top-left b=top-right c=bottom-right d=bottom-left (as the tile is drawn); one shade per corner */
+static void quad4(WorldMesh *m, P3 a, P3 b, P3 c, P3 d, int tile, float sa, float sb, float sc, float sd, float glow) {
 	if (!room(m, 6)) return;
 	float u0, v0, u1, v1; atlas_uv(tile, &u0, &v0, &u1, &v1);
-	put(m, a, u0, v0, shade); put(m, d, u0, v1, shade); put(m, c, u1, v1, shade);
-	put(m, a, u0, v0, shade); put(m, c, u1, v1, shade); put(m, b, u1, v0, shade);
+	put(m, a, u0, v0, sa, glow); put(m, d, u0, v1, sd, glow); put(m, c, u1, v1, sc, glow);
+	put(m, a, u0, v0, sa, glow); put(m, c, u1, v1, sc, glow); put(m, b, u1, v0, sb, glow);
+}
+
+static void quad(WorldMesh *m, P3 a, P3 b, P3 c, P3 d, int tile, float shade) {
+	quad4(m, a, b, c, d, tile, shade, shade, shade, shade, 0);
 }
 
 static void tri(WorldMesh *m, P3 a, P3 b, P3 c, int tile, float shade) {
 	if (!room(m, 3)) return;
 	float u0, v0, u1, v1; atlas_uv(tile, &u0, &v0, &u1, &v1);
-	put(m, a, u0, v1, shade); put(m, b, (u0 + u1) / 2, v0, shade); put(m, c, u1, v1, shade);
+	put(m, a, u0, v1, shade, 0); put(m, b, (u0 + u1) / 2, v0, shade, 0); put(m, c, u1, v1, shade, 0);
 }
 
 static P3 p3(float x, float y, float z) { P3 p = { x, y, z }; return p; }
 
-/* top face of a square at height y, 4 tiles */
-static void top_face(WorldMesh *m, float X, float Z, float y, const uint8_t t[4], float shade) {
+/* top face of a square at height y, 4 tiles, shadows tested at every corner */
+static void top_face(WorldMesh *m, float X, float Z, float y, const uint8_t t[4]) {
+	float lit = lambert(0, 1, 0), dark = lit * (1.0f - LT->shadow);
+	float s[3][3];
+	for (int j = 0; j < 3; j++) for (int i = 0; i < 3; i++)
+		s[j][i] = in_shadow(X + i * 8, y, Z + j * 8) ? dark : lit;
 	for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) {
 		float x0 = X + i * 8, z0 = Z + j * 8;
-		quad(m, p3(x0, y, z0), p3(x0 + 8, y, z0), p3(x0 + 8, y, z0 + 8), p3(x0, y, z0 + 8), t[j * 2 + i], shade);
+		quad4(m, p3(x0, y, z0), p3(x0 + 8, y, z0), p3(x0 + 8, y, z0 + 8), p3(x0, y, z0 + 8), t[j * 2 + i],
+		      s[j][i], s[j][i + 1], s[j + 1][i + 1], s[j + 1][i], 0);
 	}
 }
 
 /* ---- the build --------------------------------------------------------- */
 
-bool world_build(const GoldView *g, WorldMesh *m) {
-	static uint8_t cls[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W];
-	static short hgt[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W];
-	static uint8_t tiles[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W][4];
-	static short bld_id[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W];
-	static Bld blds[MAX_BLD];
-	static short stack[WORLD_MAX_SQ_W * WORLD_MAX_SQ_H][2];
-
+bool world_build(const GoldView *g, WorldMesh *m, const Light *light) {
 	Ctx c;
-	m->count = 0; m->buildings = 0; m->key = world_key(g);
+	m->count = 0; m->buildings = 0; m->key = world_key(g); m->light_key = light->key;
+	LT = light;
+	{
+		float hl = sqrtf(light->sun[0] * light->sun[0] + light->sun[2] * light->sun[2]);
+		if (hl < 0.01f) { sun_h[0] = sun_h[1] = 0; sun_slope = 1000; }
+		else { sun_h[0] = light->sun[0] / hl; sun_h[1] = light->sun[2] / hl; sun_slope = light->sun[1] / hl; }
+	}
 	if (!ctx_init(&c, g)) { m->sq_w = m->sq_h = 0; m->start[0] = 0; return true; }
 	const int O = WORLD_MARGIN;
 	m->origin = O;
 	m->sq_w = c.w * 2 + 2 * O; m->sq_h = c.h * 2 + 2 * O;
 	const int W = m->sq_w, H = m->sq_h;
+	GW = W; GH = H; GO = O;
 
 	for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
 		cls[y][x] = classify(&c, x - O, y - O);
@@ -167,16 +228,16 @@ bool world_build(const GoldView *g, WorldMesh *m) {
 	for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
 		if (cls[y][x] != CL_ROOF || bld_id[y][x] != -1 || nb >= MAX_BLD) continue;
 		int sp = 0, x0 = x, x1 = x, y0 = y, y1 = y;
-		bld_id[y][x] = nb; stack[sp][0] = x; stack[sp][1] = y; sp++;
+		bld_id[y][x] = nb; fill_stack[sp][0] = x; fill_stack[sp][1] = y; sp++;
 		while (sp) {
-			sp--; int cx = stack[sp][0], cy = stack[sp][1];
+			sp--; int cx = fill_stack[sp][0], cy = fill_stack[sp][1];
 			if (cx < x0) x0 = cx; if (cx > x1) x1 = cx; if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
 			static const int d[4][2] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
 			for (int k = 0; k < 4; k++) {
 				int nx = cx + d[k][0], ny = cy + d[k][1];
 				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
 				if (cls[ny][nx] == CL_ROOF && bld_id[ny][nx] == -1) {
-					bld_id[ny][nx] = nb; stack[sp][0] = nx; stack[sp][1] = ny; sp++;
+					bld_id[ny][nx] = nb; fill_stack[sp][0] = nx; fill_stack[sp][1] = ny; sp++;
 				}
 			}
 		}
@@ -188,9 +249,11 @@ bool world_build(const GoldView *g, WorldMesh *m) {
 			wy++;
 		}
 		Bld b = { x0, x1, y0, y1, wy - 1 };
-		if (b.wy1 == b.y1) {   /* no wall rows: just a roof-coloured block (e.g. a roof edge), keep as solid */
-			for (int yy = y0; yy <= y1; yy++) for (int xx = x0; xx <= x1; xx++) if (bld_id[yy][xx] == nb) bld_id[yy][xx] = -1;
-			for (int yy = y0; yy <= y1; yy++) for (int xx = x0; xx <= x1; xx++) if (cls[yy][xx] == CL_ROOF) cls[yy][xx] = CL_SOLID;
+		if (b.wy1 == b.y1) {   /* no wall rows: just a roof-coloured block, keep as solid */
+			for (int yy = y0; yy <= y1; yy++) for (int xx = x0; xx <= x1; xx++) {
+				if (bld_id[yy][xx] == nb) bld_id[yy][xx] = -1;
+				if (cls[yy][xx] == CL_ROOF) cls[yy][xx] = CL_SOLID;
+			}
 			continue;
 		}
 		for (int yy = y0; yy <= b.wy1; yy++) for (int xx = x0; xx <= x1; xx++) {
@@ -200,6 +263,7 @@ bool world_build(const GoldView *g, WorldMesh *m) {
 	}
 	m->buildings = nb;
 
+	const float s_facade = lambert(0, 0, 1);
 	for (int gy = 0; gy < H; gy++) for (int gx = 0; gx < W; gx++) {
 		m->start[gy * W + gx] = m->count;
 		const float X = (gx - O) * 16.0f, Z = (gy - O) * 16.0f;
@@ -208,54 +272,56 @@ bool world_build(const GoldView *g, WorldMesh *m) {
 		if (bld_id[gy][gx] >= 0) {
 			const Bld *b = &blds[bld_id[gy][gx]];
 			if (gy != b->wy1) continue;            /* building column emitted from its front row */
-			const int roof_tiles = (b->y1 - b->y0 + 1) * 2, wall_tiles = (b->wy1 - b->y1) * 2;
-			const float zb = (b->y0 - O) * 16.0f, zf = (b->wy1 + 1 - O) * 16.0f;
-			const float half = (zf - zb) / 2, wall_h = wall_tiles * 8.0f, rise = half * 0.6f;
+			BShape s = bshape(b);
+			float rl = sqrtf(s.half * s.half + s.rise * s.rise);
+			float s_front = lambert(0, s.half / rl, s.rise / rl), s_back = lambert(0, s.half / rl, -s.rise / rl);
 			for (int i = 0; i < 2; i++) {
 				const float x0 = X + i * 8, x1 = x0 + 8;
-				for (int r = 0; r < wall_tiles; r++) {     /* facade: wall art stands up */
+				for (int r = 0; r < s.wall_tiles; r++) {   /* facade: wall art stands up; windows light up at night */
 					int tile = tiles[b->y1 + 1 + r / 2][gx][(r % 2) * 2 + i];
-					float yt = wall_h - r * 8, yb = yt - 8;
-					quad(m, p3(x0, yt, zf), p3(x1, yt, zf), p3(x1, yb, zf), p3(x0, yb, zf), tile, 0.92f);
+					float glow = tile_pal(g, c.palmap, tile) == PAL_YELLOW ? 1.0f : 0.0f;
+					float yt = s.wall_h - r * 8, yb = yt - 8;
+					float sh = s_facade * 0.95f;
+					quad4(m, p3(x0, yt, s.zf), p3(x1, yt, s.zf), p3(x1, yb, s.zf), p3(x0, yb, s.zf), tile, sh, sh, sh, sh, glow);
 				}
-				for (int k = 0; k < roof_tiles; k++) {     /* gable roof: eave at the front, ridge mid-depth */
+				for (int k = 0; k < s.roof_tiles; k++) {    /* gable roof: eave at the front, ridge mid-depth */
 					int tile = tiles[b->y0 + k / 2][gx][(k % 2) * 2 + i];
-					float tt = 1.0f - (float)k / roof_tiles, tb = 1.0f - (float)(k + 1) / roof_tiles;
-					float yt = wall_h + tt * rise, yb = wall_h + tb * rise;
-					quad(m, p3(x0, yt, zf - tt * half), p3(x1, yt, zf - tt * half),
-					        p3(x1, yb, zf - tb * half), p3(x0, yb, zf - tb * half), tile, 1.0f);
-					quad(m, p3(x0, yt, zb + tt * half), p3(x1, yt, zb + tt * half),
-					        p3(x1, yb, zb + tb * half), p3(x0, yb, zb + tb * half), tile, 0.72f);
+					float tt = 1.0f - (float)k / s.roof_tiles, tb = 1.0f - (float)(k + 1) / s.roof_tiles;
+					float yt = s.wall_h + tt * s.rise, yb = s.wall_h + tb * s.rise;
+					quad(m, p3(x0, yt, s.zf - tt * s.half), p3(x1, yt, s.zf - tt * s.half),
+					        p3(x1, yb, s.zf - tb * s.half), p3(x0, yb, s.zf - tb * s.half), tile, s_front);
+					quad(m, p3(x0, yt, s.zb + tt * s.half), p3(x1, yt, s.zb + tt * s.half),
+					        p3(x1, yb, s.zb + tb * s.half), p3(x0, yb, s.zb + tb * s.half), tile, s_back);
 				}
 			}
-			for (int side = 0; side < 2; side++) {            /* end walls + gables */
+			for (int side = 0; side < 2; side++) {          /* end walls + gables */
 				if ((side == 0 && gx != b->x0) || (side == 1 && gx != b->x1)) continue;
 				float x = side ? X + 16 : X;
 				int edge = tiles[b->y1 + 1][gx][side ? 1 : 0];
 				int roofedge = tiles[b->y0][gx][side ? 1 : 0];
-				float s = side ? 0.7f : 0.8f;
-				quad(m, p3(x, wall_h, zb), p3(x, wall_h, zf), p3(x, 0, zf), p3(x, 0, zb), edge, s);
-				tri(m, p3(x, wall_h, zb), p3(x, wall_h + rise, zb + half), p3(x, wall_h, zf), roofedge, s * 0.9f);
+				float sl = lambert(side ? 1.0f : -1.0f, 0, 0);
+				quad(m, p3(x, s.wall_h, s.zb), p3(x, s.wall_h, s.zf), p3(x, 0, s.zf), p3(x, 0, s.zb), edge, sl);
+				tri(m, p3(x, s.wall_h, s.zb), p3(x, s.wall_h + s.rise, s.zb + s.half), p3(x, s.wall_h, s.zf), roofedge, sl * 0.92f);
 			}
 			continue;
 		}
 
 		const int h = hgt[gy][gx];
-		top_face(m, X, Z, (float)h, t, 1.0f);
-		/* sides wherever a neighbour is lower */
+		top_face(m, X, Z, (float)h, t);
+		/* sides wherever a neighbour is lower, lit by how much they face the sun */
 		static const int nd[4][2] = { {0,1}, {1,0}, {-1,0}, {0,-1} };   /* S E W N */
-		static const float ns[4] = { 0.82f, 0.68f, 0.74f, 0.6f };
 		for (int k = 0; k < 4; k++) {
 			int nx = gx + nd[k][0], ny = gy + nd[k][1];
 			int hn = (nx < 0 || ny < 0 || nx >= W || ny >= H) ? h : hgt[ny][nx];
 			if (hn == H_BUILDING || hn >= h) continue;
 			float yt = (float)h, yb = (float)hn;
+			float sl = lambert((float)nd[k][0], 0, (float)nd[k][1]) * 0.92f;
 			for (int i = 0; i < 2; i++) {
 				switch (k) {
-				case 0: quad(m, p3(X + i*8, yt, Z + 16), p3(X + i*8 + 8, yt, Z + 16), p3(X + i*8 + 8, yb, Z + 16), p3(X + i*8, yb, Z + 16), t[2 + i], ns[k]); break;
-				case 1: quad(m, p3(X + 16, yt, Z + i*8 + 8), p3(X + 16, yt, Z + i*8), p3(X + 16, yb, Z + i*8), p3(X + 16, yb, Z + i*8 + 8), t[1 + 2*i], ns[k]); break;
-				case 2: quad(m, p3(X, yt, Z + i*8), p3(X, yt, Z + i*8 + 8), p3(X, yb, Z + i*8 + 8), p3(X, yb, Z + i*8), t[2*i], ns[k]); break;
-				case 3: quad(m, p3(X + i*8 + 8, yt, Z), p3(X + i*8, yt, Z), p3(X + i*8, yb, Z), p3(X + i*8 + 8, yb, Z), t[i], ns[k]); break;
+				case 0: quad(m, p3(X + i*8, yt, Z + 16), p3(X + i*8 + 8, yt, Z + 16), p3(X + i*8 + 8, yb, Z + 16), p3(X + i*8, yb, Z + 16), t[2 + i], sl); break;
+				case 1: quad(m, p3(X + 16, yt, Z + i*8 + 8), p3(X + 16, yt, Z + i*8), p3(X + 16, yb, Z + i*8), p3(X + 16, yb, Z + i*8 + 8), t[1 + 2*i], sl); break;
+				case 2: quad(m, p3(X, yt, Z + i*8), p3(X, yt, Z + i*8 + 8), p3(X, yb, Z + i*8 + 8), p3(X, yb, Z + i*8), t[2*i], sl); break;
+				case 3: quad(m, p3(X + i*8 + 8, yt, Z), p3(X + i*8, yt, Z), p3(X + i*8, yb, Z), p3(X + i*8 + 8, yb, Z), t[i], sl); break;
 				}
 			}
 		}
@@ -331,8 +397,35 @@ int world_sprites(const GoldView *g, float cam_x, float cam_z, WVert *out, int c
 		if (at[i] & 0x20) { float s = u0; u0 = u1; u1 = s; }
 		if (at[i] & 0x40) { float s = v0; v0 = v1; v1 = s; }
 		WVert q[6] = {
-			{ x0, yt, z, u0, v0, 1 }, { x0, yb, z, u0, v1, 1 }, { x1, yb, z, u1, v1, 1 },
-			{ x0, yt, z, u0, v0, 1 }, { x1, yb, z, u1, v1, 1 }, { x1, yt, z, u1, v0, 1 },
+			{ x0, yt, z, u0, v0, 1, 0 }, { x0, yb, z, u0, v1, 1, 0 }, { x1, yb, z, u1, v1, 1, 0 },
+			{ x0, yt, z, u0, v0, 1, 0 }, { x1, yb, z, u1, v1, 1, 0 }, { x1, yt, z, u1, v0, 1, 0 },
+		};
+		memcpy(out + cnt, q, sizeof q); cnt += 6;
+	}
+	return cnt;
+}
+
+int world_sprite_shadows(const GoldView *g, float cam_x, float cam_z, WVert *out, int cap) {
+	int sx[40], sy[40], n = 0, cnt = 0;
+	for (int i = 0; i < 40; i++) {
+		uint8_t y = gv8(g, 0xFE00 + i * 4), x = gv8(g, 0xFE01 + i * 4);
+		if (y == 0 || y >= 160 || x == 0 || x >= 168) continue;
+		sx[n] = x - 8; sy[n] = y - 16; n++;
+	}
+	/* one shadow per actor: at its bottom-left 8x8 sprite */
+	for (int i = 0; i < n && cnt + 6 <= cap; i++) {
+		bool below = false, left = false, above = false;
+		for (int j = 0; j < n; j++) {
+			if (sx[j] == sx[i] && sy[j] == sy[i] + 8) below = true;
+			if (sx[j] == sx[i] - 8 && sy[j] == sy[i]) left = true;
+			if (sx[j] == sx[i] && sy[j] == sy[i] - 8) above = true;
+		}
+		if (below || left || !above) continue;
+		float cx = cam_x + (sx[i] - 64) + 8, z = cam_z + (sy[i] + 8 - 64) + 3;
+		float x0 = cx - 9, x1 = cx + 9, z0 = z - 5, z1 = z + 4, y = 0.35f;
+		WVert q[6] = {
+			{ x0, y, z0, 0, 0, 0, 0 }, { x0, y, z1, 0, 1, 0, 0 }, { x1, y, z1, 1, 1, 0, 0 },
+			{ x0, y, z0, 0, 0, 0, 0 }, { x1, y, z1, 1, 1, 0, 0 }, { x1, y, z0, 1, 0, 0, 0 },
 		};
 		memcpy(out + cnt, q, sizeof q); cnt += 6;
 	}

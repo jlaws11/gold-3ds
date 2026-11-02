@@ -4,10 +4,11 @@
  * Bottom screen: the original Game Boy picture (text, menus, battles).
  *
  * Controls: A/B/START/SELECT/D-pad/Circle Pad as on Game Boy.
- *   X      switch the top screen between 3D and the original picture
- *   Y      cycle camera angle
- *   L / R  rotate the camera,  ZL / ZR (New 3DS) zoom,  C-stick (New 3DS) orbit
+ *   X        switch the top screen between 3D and the original picture
+ *   ZL / ZR  (New 3DS) zoom out / in
  *   3D slider: stereoscopic depth
+ * The camera is fixed: it follows the player from the south, like the original.
+ * Lighting follows the game's clock: moving sun and shadows, sunset, lit windows at night.
  */
 #include <3ds.h>
 #include <stdio.h>
@@ -19,6 +20,7 @@
 #include "core.h"
 #include "world.h"
 #include "render.h"
+#include "light.h"
 
 #define APP_DIR  "sdmc:/3ds/gold3ds"
 #define ROM_PATH APP_DIR "/gold.gbc"
@@ -58,8 +60,8 @@ static void fatal(const char *msg) {
 	exit(0);
 }
 
-typedef struct { float pitch, dist; } Preset;
-static const Preset presets[] = { { 0.95f, 230.0f }, { 0.55f, 170.0f }, { 1.35f, 300.0f } };
+#define CAM_PITCH 0.72f    /* about 41 degrees above the ground */
+#define CAM_DIST  215.0f
 
 static float approach(float cur, float target) {
 	float d = target - cur;
@@ -68,8 +70,6 @@ static float approach(float cur, float target) {
 	if (fabsf(d) <= step) return target;
 	return cur + (d > 0 ? step : -step);
 }
-
-static const uint32_t sky_by_time[4] = { 0xF4D2A0FF, 0x84BEE6FF, 0x2C3A64FF, 0x101420FF };
 
 int main(void) {
 	gfxInitDefault();
@@ -93,8 +93,9 @@ int main(void) {
 	WorldMesh *mesh = render_mesh();
 	static uint32_t atlas[128 * 128];
 
-	Camera cam = { 0, 0, 0, presets[0].pitch, presets[0].dist };
-	int preset = 0;
+	Camera cam = { 0, 0, CAM_PITCH, CAM_DIST };
+	Light light;
+	light_compute(12, 0, ENV_OUTDOOR, &light);
 	bool voxel = true;
 	uint32_t atlas_key = 0, saved_hash = core_sram_hash(), last_hash = saved_hash;
 	unsigned frame = 0;
@@ -114,23 +115,16 @@ int main(void) {
 		if (held & KEY_RIGHT)  b |= BTN_RIGHT;
 
 		if (down & KEY_X) voxel = !voxel;
-		if (down & KEY_Y) { preset = (preset + 1) % 3; cam.pitch = presets[preset].pitch; cam.dist = presets[preset].dist; cam.yaw = 0; }
-		if (held & KEY_L) cam.yaw += 0.03f;
-		if (held & KEY_R) cam.yaw -= 0.03f;
-		if (held & KEY_ZL) cam.dist = fminf(420, cam.dist + 3);
-		if (held & KEY_ZR) cam.dist = fmaxf(90, cam.dist - 3);
-		circlePosition cs; hidCstickRead(&cs);
-		cam.yaw -= cs.dx * 0.0003f;
-		cam.pitch = fminf(1.45f, fmaxf(0.3f, cam.pitch + cs.dy * 0.0002f));
-		if (cam.yaw > 1.2f) cam.yaw = 1.2f;
-		if (cam.yaw < -1.2f) cam.yaw = -1.2f;
+		if (held & KEY_ZL) cam.dist = fminf(320, cam.dist + 2);
+		if (held & KEY_ZR) cam.dist = fmaxf(130, cam.dist - 2);
 
 		core_frame(b);
 
 		bool overworld = gv8(&g, wMapStatus) == MAPSTATUS_HANDLE && gv8(&g, wBattleMode) == 0 && gv8(&g, wMapGroup) != 0;
 		if (overworld) {
-			if (world_key(&g) != mesh->key) {
-				world_build(&g, mesh);
+			light_compute(gv8(&g, hHours), gv8(&g, hMinutes), light_env(gv8(&g, wEnvironment)), &light);
+			if (world_key(&g) != mesh->key || light.key != mesh->light_key) {
+				world_build(&g, mesh, &light);   /* shadows are baked into the mesh */
 				render_mesh_uploaded();
 			}
 			if ((frame & 3) == 0) {   /* tile animations, time of day, tileset swaps */
@@ -147,12 +141,14 @@ int main(void) {
 			cam.x = approach(cam.x, gv8(&g, wXCoord) * 16.0f);
 			cam.z = approach(cam.z, gv8(&g, wYCoord) * 16.0f);
 		}
-		int cap, nspr = 0;
+		int cap, nspr = 0, nshadow = 0;
 		WVert *sbuf = render_sprite_buf(&cap);
 		if (overworld) nspr = world_sprites(&g, cam.x, cam.z, sbuf, cap);
+		WVert *shbuf = render_shadow_buf(&cap);
+		if (overworld) nshadow = world_sprite_shadows(&g, cam.x, cam.z, shbuf, cap);
 
 		render_lcd(core_lcd());
-		render_frame(voxel && overworld && mesh->count > 0, &cam, nspr, sky_by_time[gv8(&g, wTimeOfDayPal) & 3]);
+		render_frame(voxel && overworld && mesh->count > 0, &cam, nspr, nshadow, &light);
 
 		/* save once the game's save data has changed and then stayed still for 2 seconds */
 		if (++frame % 120 == 0) {

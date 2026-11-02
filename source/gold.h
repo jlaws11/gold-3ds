@@ -9,6 +9,7 @@
 /* WRAM */
 #define wOverworldMapBlocks      0xC700   /* (w+6)*(h+6) block ids, 3-block border */
 #define wMapTileset              0xD082
+#define wEnvironment             0xD083   /* 1 town, 2 route, 3 indoor, 4 cave, 6 gate, 7 dungeon */
 #define wMapHeight               0xD087
 #define wMapWidth                0xD088
 #define wTilesetBlocksBank       0xD0C5
@@ -23,6 +24,10 @@
 #define wMapNumber               0xDA01
 #define wYCoord                  0xDA02
 #define wXCoord                  0xDA03
+
+/* HRAM: the game's clock (already includes the player's time offset) */
+#define hHours                   0xFF96
+#define hMinutes                 0xFF98
 
 /* ROM tables (bank, address) */
 #define ROM_COLLISION_PERMS_BANK 0x3E

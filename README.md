@@ -25,11 +25,23 @@ addresses it reads are specific to this release.
 | --- | --- |
 | A, B, START, SELECT, D-pad / Circle Pad | Game Boy controls |
 | X | Top screen: 3D world ↔ original picture |
-| Y | Cycle camera angle (3DS angle, close, top-down) |
-| L / R | Rotate camera |
-| ZL / ZR (New 3DS) | Zoom |
-| C-stick (New 3DS) | Orbit camera |
+| ZL / ZR (New 3DS) | Zoom out / in |
 | 3D slider | Stereoscopic depth |
+
+The camera is fixed behind the player, looking north like the original game.
+
+## Day and night
+
+Lighting follows the game's own clock (the one you set at the start of Gold):
+
+- The sun rises in the east, crosses the sky and sets in the west, so shadows
+  from houses and trees are long in the morning, short at noon and swing
+  round in the evening. They update every 20 game minutes.
+- Warm light at dawn and sunset, a sky colour that changes through the day,
+  and a blue night on top of Gold's own morning/day/night palettes.
+- House windows and doorways light up after dark.
+- The player and NPCs have soft shadows under their feet.
+- Indoors and in caves the light comes from above instead.
 
 ## How it works
 
@@ -40,6 +52,8 @@ addresses it reads are specific to this release.
   fences and ledges, sunken water, and houses whose wall art becomes the front
   facade under a gable roof made from the roof tiles. Colours are Gold's own
   Game Boy Color palettes for the current time of day.
+- `source/light.c` turns the game clock into sun direction, shadow strength,
+  sky and tint; shadows are baked into the mesh by tracing toward the sun.
 - `source/render.c` draws it with citro3d, culled to the squares around the
   player, plus the player and NPC sprites as upright cut-outs.
 - Memory addresses come from [pret/pokegold](https://github.com/pret/pokegold)'s symbol file.

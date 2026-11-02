@@ -4,8 +4,9 @@
  * x = east, y = up, z = south; one map square is 16 x 16. */
 #pragma once
 #include "gold.h"
+#include "light.h"
 
-typedef struct { float x, y, z, u, v, shade; } WVert;
+typedef struct { float x, y, z, u, v, shade, glow; } WVert;
 
 #define WORLD_MARGIN 6                 /* squares drawn beyond the map edge (border blocks) */
 #define WORLD_MAX_SQ_W (64 + 2 * WORLD_MARGIN)
@@ -21,13 +22,15 @@ typedef struct {
 	int start[WORLD_MAX_SQ_W * WORLD_MAX_SQ_H + 1];
 	uint32_t key;          /* hash of what the mesh was built from */
 	int buildings;
+	int light_key;          /* Light.key the shadows were baked for */
 } WorldMesh;
 
 /* Hash of map id, layout, tileset: rebuild the mesh when this changes. */
 uint32_t world_key(const GoldView *g);
 
-/* Rebuild mesh. Returns false if the buffer was too small (mesh truncated). */
-bool world_build(const GoldView *g, WorldMesh *m);
+/* Rebuild mesh with shadows and shading baked for this light.
+ * Returns false if the buffer was too small (mesh truncated). */
+bool world_build(const GoldView *g, WorldMesh *m, const Light *light);
 
 /* Vertex range for grid squares [x0,x1] in row y (clamped). */
 void world_row_range(const WorldMesh *m, int y, int x0, int x1, int *first, int *count);
@@ -42,6 +45,9 @@ void world_obj_atlas(const GoldView *g, uint32_t *rgba);
 /* Upright sprite quads for the player and NPCs, from OAM. cam_x/cam_z is where the
  * player is drawn (world pixels, top-left of the player's square). */
 int world_sprites(const GoldView *g, float cam_x, float cam_z, WVert *out, int cap);
+
+/* Soft round shadows under the same actors (texture: a 16x16 blob, uv 0..1). */
+int world_sprite_shadows(const GoldView *g, float cam_x, float cam_z, WVert *out, int cap);
 
 /* UV of a tile in either atlas (v grows downward, 0 = top row of atlas). */
 static inline void atlas_uv(int tile, float *u0, float *v0, float *u1, float *v1) {

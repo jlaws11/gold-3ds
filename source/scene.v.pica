@@ -1,6 +1,8 @@
-; Gold 3DS vertex shader: position + texcoord + shade (baked face lighting)
+; Gold 3DS vertex shader: position + texcoord + (shade, glow)
+; colour = shade * ambient + glow * glowClr   (ambient/glowClr follow the time of day)
 
 .fvec projection[4], modelView[4]
+.fvec ambient, glowClr
 
 .constf myconst(0.0, 1.0, 0.0, 0.0)
 .alias  ones  myconst.yyyy
@@ -11,7 +13,7 @@
 
 .alias inpos   v0
 .alias intex   v1
-.alias inshade v2
+.alias inlight v2   ; x = baked shade, y = window glow
 
 .proc main
 	mov r0.xyz, inpos
@@ -29,7 +31,9 @@
 
 	mov outtc0, intex
 
-	mov r2, inshade.xxxx
+	mul r2, ambient, inlight.xxxx
+	mad r2, inlight.yyyy, glowClr, r2
+	min r2, ones, r2
 	mov r2.w, ones
 	mov outclr, r2
 	end
