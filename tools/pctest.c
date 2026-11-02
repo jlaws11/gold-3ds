@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
 	bool ok = world_build(&g, &m, &L);
 	float cx = gv8(&g, wXCoord) * 16.0f, cz = gv8(&g, wYCoord) * 16.0f;
 	static WVert spr[40 * 6], shd[40 * 6];
-	int ns = world_sprites(&g, cx, cz, spr, 40 * 6);
+	int ns = world_sprites(&g, cx, cz, false, spr, 40 * 6);
 	int nsh = world_sprite_shadows(&g, cx, cz, shd, 40 * 6);
 	static uint32_t bg[128 * 128], obj[128 * 128];
 	world_bg_atlas(&g, bg); world_obj_atlas(&g, obj);

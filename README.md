@@ -15,6 +15,10 @@ battles stay readable.
 3. Copy it to `/3ds/gold3ds/Gold3DS.3dsx` on the SD card.
 4. Copy your Pokémon Gold (USA/Europe) ROM to `/3ds/gold3ds/gold.gbc`.
 5. Launch **Gold 3DS** from the Homebrew Launcher. Saves go to `/3ds/gold3ds/gold.sav`.
+6. Optional, for a taller player: copy your own Pokémon FireRed or LeafGreen
+   ROM (English, v1.0 or v1.1) to `/3ds/gold3ds/firered.gba`. At startup the
+   app reads Red's walking sprite from it and uses it for the player in 3D.
+   Without it, the normal Gold sprite is used. Biking and surfing keep the Gold sprite.
 
 The app checks the ROM header and refuses other versions, since the memory
 addresses it reads are specific to this release.
@@ -49,7 +53,8 @@ Lighting follows the game's own clock (the one you set at the start of Gold):
 - `source/world.c` reads the current map's block layout from WRAM
   (`wOverworldMapBlocks`), the tileset's metatiles and collision from the ROM,
   and the tile graphics from VRAM, then builds a textured mesh: raised trees,
-  fences and ledges, sunken water, and houses whose wall art becomes the front
+  fences and ledges, sunken water, rounded eight-sided tree crowns on trunks,
+  and houses whose wall art becomes the front
   facade under a gable roof made from the roof tiles. Colours are Gold's own
   Game Boy Color palettes for the current time of day.
 - `source/light.c` turns the game clock into sun direction, shadow strength,

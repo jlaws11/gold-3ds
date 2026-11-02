@@ -9,6 +9,8 @@
  *   3D slider: stereoscopic depth
  * The camera is fixed: it follows the player from the south, like the original.
  * Lighting follows the game's clock: moving sun and shadows, sunset, lit windows at night.
+ * Optional: put your own FireRed/LeafGreen ROM at /3ds/gold3ds/firered.gba for a
+ * taller player sprite (Red), read from that ROM at startup.
  */
 #include <3ds.h>
 #include <stdio.h>
@@ -21,10 +23,12 @@
 #include "world.h"
 #include "render.h"
 #include "light.h"
+#include "tallsprite.h"
 
 #define APP_DIR  "sdmc:/3ds/gold3ds"
 #define ROM_PATH APP_DIR "/gold.gbc"
 #define SAV_PATH APP_DIR "/gold.sav"
+#define TALL_PATH APP_DIR "/firered.gba"   /* optional: your own FireRed or LeafGreen */
 
 static uint8_t *load_file(const char *path, size_t *n) {
 	FILE *f = fopen(path, "rb");
@@ -63,6 +67,23 @@ static void fatal(const char *msg) {
 #define CAM_PITCH 0.72f    /* about 41 degrees above the ground */
 #define CAM_DIST  215.0f
 
+/* Read Red's sprite sheet from the player's own FireRed/LeafGreen, if present. */
+static bool load_tall_sprite(void) {
+	FILE *f = fopen(TALL_PATH, "rb");
+	if (!f) return false;
+	static uint8_t hdr[0xC0], pal[TALL_PAL_SIZE], pic[TALL_PIC_SIZE];
+	static uint32_t sheet[TALL_TEX_W * TALL_TEX_H];
+	bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr;
+	const TallSource *src = ok ? tall_source(hdr, sizeof hdr) : NULL;
+	ok = src && fseek(f, src->pal, SEEK_SET) == 0 && fread(pal, 1, sizeof pal, f) == sizeof pal
+	         && fseek(f, src->pic, SEEK_SET) == 0 && fread(pic, 1, sizeof pic, f) == sizeof pic;
+	fclose(f);
+	if (!ok) return false;
+	tall_decode(pal, pic, sheet);
+	render_tall_sheet(sheet);
+	return true;
+}
+
 static float approach(float cur, float target) {
 	float d = target - cur;
 	if (fabsf(d) > 48) return target;               /* warps, map changes */
@@ -89,6 +110,9 @@ int main(void) {
 	core_set_clock(localtime(&now));
 
 	render_init();
+	bool tall = load_tall_sprite();
+	float walked = 0;    /* distance walked, drives the step animation */
+	int idle = 99;       /* frames since the camera last moved */
 	GoldView g = { rom, rom_size, core_peek, NULL };
 	WorldMesh *mesh = render_mesh();
 	static uint32_t atlas[128 * 128];
@@ -138,17 +162,28 @@ int main(void) {
 					world_obj_atlas(&g, atlas); render_obj_atlas(atlas);
 				}
 			}
+			float ox = cam.x, oz = cam.z;
 			cam.x = approach(cam.x, gv8(&g, wXCoord) * 16.0f);
 			cam.z = approach(cam.z, gv8(&g, wYCoord) * 16.0f);
+			float moved = fabsf(cam.x - ox) + fabsf(cam.z - oz);
+			if (moved > 0 && moved < 8) { walked += moved; idle = 0; } else idle++;
 		}
 		int cap, nspr = 0, nshadow = 0;
 		WVert *sbuf = render_sprite_buf(&cap);
-		if (overworld) nspr = world_sprites(&g, cam.x, cam.z, sbuf, cap);
+		/* tall player only when walking: the Gold sprite still shows bike and surf */
+		bool tall_now = tall && overworld && gv8(&g, wPlayerState) == 0;
+		if (overworld) nspr = world_sprites(&g, cam.x, cam.z, tall_now, sbuf, cap);
+		int nplayer = 0;
+		if (tall_now) {
+			bool flip;
+			int fr = tall_frame(gv8(&g, wPlayerDirection), ((int)(walked / 8)) & 3, idle < 3, &flip);
+			nplayer = world_tall_player(cam.x, cam.z, fr, flip, render_player_buf());
+		}
 		WVert *shbuf = render_shadow_buf(&cap);
 		if (overworld) nshadow = world_sprite_shadows(&g, cam.x, cam.z, shbuf, cap);
 
 		render_lcd(core_lcd());
-		render_frame(voxel && overworld && mesh->count > 0, &cam, nspr, nshadow, &light);
+		render_frame(voxel && overworld && mesh->count > 0, &cam, nspr, nshadow, nplayer, &light);
 
 		/* save once the game's save data has changed and then stayed still for 2 seconds */
 		if (++frame % 120 == 0) {

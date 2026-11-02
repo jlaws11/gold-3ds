@@ -4,6 +4,7 @@
 #include <math.h>
 #include "render.h"
 #include "scene_shbin.h"
+#include "tallsprite.h"
 
 #define DISPLAY_TRANSFER_FLAGS \
 	(GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
@@ -17,9 +18,9 @@ static C3D_RenderTarget *top_l, *top_r, *bottom;
 static DVLB_s *dvlb;
 static shaderProgram_s prog;
 static int u_proj, u_mv, u_amb, u_glow;
-static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob;
+static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob, tex_tall;
 static WorldMesh mesh;
-static WVert *spr, *shadows, *screen_quads;
+static WVert *spr, *shadows, *player, *screen_quads;
 static uint32_t *lcd_rgba;
 
 /* PICA200 textures are stored in 8x8 tiles with Morton (Z-order) texels. */
@@ -87,6 +88,7 @@ void render_init(void) {
 	tex_new(&tex_obj, 128, 128);
 	tex_new(&tex_lcd, 256, 256);
 	tex_new(&tex_blob, 16, 16);
+	tex_new(&tex_tall, TALL_TEX_W, TALL_TEX_H);
 	{   /* soft round shadow, darkest in the middle */
 		static uint32_t blob[16 * 16];
 		for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) {
@@ -103,6 +105,7 @@ void render_init(void) {
 	mesh.count = 0; mesh.sq_w = mesh.sq_h = 0; mesh.key = 0;
 	spr = linearAlloc(sizeof(WVert) * SPRITE_CAP);
 	shadows = linearAlloc(sizeof(WVert) * SPRITE_CAP);
+	player = linearAlloc(sizeof(WVert) * 6);
 	screen_quads = linearAlloc(sizeof(WVert) * 12);
 	lcd_rgba = linearAlloc(160 * 144 * 4);
 	/* Game Boy picture at 1.5x: 240x216, centred on each screen */
@@ -112,7 +115,7 @@ void render_init(void) {
 }
 
 void render_exit(void) {
-	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob);
+	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob); C3D_TexDelete(&tex_tall); linearFree(player);
 	linearFree(mesh.verts); linearFree(spr); linearFree(shadows); linearFree(screen_quads); linearFree(lcd_rgba);
 	shaderProgramFree(&prog);
 	DVLB_Free(dvlb);
@@ -125,6 +128,8 @@ void render_bg_atlas(const uint32_t *rgba) { upload(&tex_bg, rgba, 128, 128, 128
 void render_obj_atlas(const uint32_t *rgba) { upload(&tex_obj, rgba, 128, 128, 128); }
 WVert *render_sprite_buf(int *cap) { *cap = SPRITE_CAP; return spr; }
 WVert *render_shadow_buf(int *cap) { *cap = SPRITE_CAP; return shadows; }
+WVert *render_player_buf(void) { return player; }
+void render_tall_sheet(const uint32_t *rgba) { upload(&tex_tall, rgba, TALL_TEX_W, TALL_TEX_H, TALL_TEX_W); }
 
 void render_lcd(const uint8_t *lcd) {
 	/* soft cream-to-ink ramp until the colour core lands */
@@ -140,7 +145,7 @@ static void use_buffer(WVert *base) {
 	BufInfo_Add(bi, base, sizeof(WVert), 3, 0x210);
 }
 
-static void draw_world(const Camera *cam, float iod, int sprite_verts, int shadow_verts, const Light *L) {
+static void draw_world(const Camera *cam, float iod, int sprite_verts, int shadow_verts, int player_verts, const Light *L) {
 	C3D_Mtx proj, mv;
 	float focal = cam->dist;
 	Mtx_PerspStereoTilt(&proj, C3D_AngleFromDegrees(42.0f), C3D_AspectRatioTop, 6.0f, 1600.0f, iod, focal, false);
@@ -180,6 +185,11 @@ static void draw_world(const Camera *cam, float iod, int sprite_verts, int shado
 		use_buffer(spr);
 		C3D_DrawArrays(GPU_TRIANGLES, 0, sprite_verts);
 	}
+	if (player_verts > 0) {
+		C3D_TexBind(0, &tex_tall);
+		use_buffer(player);
+		C3D_DrawArrays(GPU_TRIANGLES, 0, player_verts);
+	}
 }
 
 static void draw_picture(bool top) {
@@ -196,20 +206,21 @@ static void draw_picture(bool top) {
 	C3D_DrawArrays(GPU_TRIANGLES, top ? 0 : 6, 6);
 }
 
-void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, const Light *L) {
+void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, const Light *L) {
 	uint32_t sky = L->sky;
 	if (sprite_verts > 0) GSPGPU_FlushDataCache(spr, sizeof(WVert) * sprite_verts);
 	if (shadow_verts > 0) GSPGPU_FlushDataCache(shadows, sizeof(WVert) * shadow_verts);
+	if (player_verts > 0) GSPGPU_FlushDataCache(player, sizeof(WVert) * player_verts);
 	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 	if (voxel) {
 		float iod = osGet3DSliderState() * cam->dist / 24.0f;
 		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, sky, 0);
 		C3D_FrameDrawOn(top_l);
-		draw_world(cam, -iod, sprite_verts, shadow_verts, L);
+		draw_world(cam, -iod, sprite_verts, shadow_verts, player_verts, L);
 		if (iod > 0.0f) {
 			C3D_RenderTargetClear(top_r, C3D_CLEAR_ALL, sky, 0);
 			C3D_FrameDrawOn(top_r);
-			draw_world(cam, iod, sprite_verts, shadow_verts, L);
+			draw_world(cam, iod, sprite_verts, shadow_verts, player_verts, L);
 		}
 	} else {
 		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, 0x101218FF, 0);

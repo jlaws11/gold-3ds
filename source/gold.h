@@ -17,9 +17,11 @@
 #define wTilesetCollisionBank    0xD0C8
 #define wTilesetCollisionAddress 0xD0C9
 #define wTilesetPalettes         0xD0CF   /* pointer into bank 02 */
+#define wPlayerDirection         0xD205   /* 0 down, 4 up, 8 left, 12 right */
 #define wBattleMode              0xD116
 #define wMapStatus               0xD159   /* 2 = MAPSTATUS_HANDLE (overworld loop) */
 #define wTimeOfDayPal            0xD568   /* 0 morn, 1 day, 2 nite, 3 dark */
+#define wPlayerState             0xD682   /* 0 walking, 1 bike, 4 surf */
 #define wMapGroup                0xDA00
 #define wMapNumber               0xDA01
 #define wYCoord                  0xDA02

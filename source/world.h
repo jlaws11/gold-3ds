@@ -43,8 +43,12 @@ void world_bg_atlas(const GoldView *g, uint32_t *rgba);
 void world_obj_atlas(const GoldView *g, uint32_t *rgba);
 
 /* Upright sprite quads for the player and NPCs, from OAM. cam_x/cam_z is where the
- * player is drawn (world pixels, top-left of the player's square). */
-int world_sprites(const GoldView *g, float cam_x, float cam_z, WVert *out, int cap);
+ * player is drawn (world pixels, top-left of the player's square).
+ * hide_player leaves out the player (drawn separately as the tall sprite). */
+int world_sprites(const GoldView *g, float cam_x, float cam_z, bool hide_player, WVert *out, int cap);
+
+/* One upright 16x32 quad for the tall player, using frame `frame` of the tall sheet. */
+int world_tall_player(float cam_x, float cam_z, int frame, bool flip, WVert *out);
 
 /* Soft round shadows under the same actors (texture: a 16x16 blob, uv 0..1). */
 int world_sprite_shadows(const GoldView *g, float cam_x, float cam_z, WVert *out, int cap);

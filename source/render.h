@@ -16,6 +16,8 @@ void render_obj_atlas(const uint32_t *rgba);
 void render_lcd(const uint8_t *lcd);   /* 160x144 shades from core_lcd() */
 WVert *render_sprite_buf(int *cap);
 WVert *render_shadow_buf(int *cap);
+WVert *render_player_buf(void);              /* 6 vertices for the tall player */
+void render_tall_sheet(const uint32_t *rgba); /* TALL_TEX_W x TALL_TEX_H */
 
 /* One frame. voxel=false shows the Game Boy picture on the top screen instead. */
-void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, const Light *light);
+void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, const Light *light);
