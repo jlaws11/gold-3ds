@@ -32,6 +32,10 @@ uint32_t world_key(const GoldView *g);
  * Returns false if the buffer was too small (mesh truncated). */
 bool world_build(const GoldView *g, WorldMesh *m, const Light *light);
 
+/* Is the ground at this world point open (path, grass, floor) in the last built map?
+ * Used to find somewhere clear to stage a battle. */
+bool world_open(float x, float z);
+
 /* Vertex range for grid squares [x0,x1] in row y (clamped). */
 void world_row_range(const WorldMesh *m, int y, int x0, int x1, int *first, int *count);
 

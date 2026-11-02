@@ -27,6 +27,14 @@
 #define wYCoord                  0xDA02
 #define wXCoord                  0xDA03
 
+/* battle */
+#define wBattleMonSpecies        0xCB0C   /* cleared at battle start, set when our Pokemon is sent out */
+#define wBattleMonDVs            0xCB12
+#define wBattleMonHP             0xCB1C   /* big-endian */
+#define wEnemyMonSpecies         0xD0EF
+#define wEnemyMonDVs             0xD0F5
+#define wEnemyMonHP              0xD0FF   /* big-endian */
+
 /* HRAM: the game's clock (already includes the player's time offset) */
 #define hHours                   0xFF96
 #define hMinutes                 0xFF98

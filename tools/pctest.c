@@ -1,13 +1,23 @@
 /* PC check for world.c + light.c: builds the same mesh the 3DS draws, from a RAM dump.
- * Usage: pctest rom.gbc dump.bin out.bin [hour minute]
+ * Usage: pctest rom.gbc dump.bin out.bin [hour minute [firered.gba enemy ally]]
+ *   with firered.gba: fakes a wild battle against `enemy` with `ally` out, as the 3DS draws it
  * dump.bin = bytes of 0x8000-0xFFFF. The optional time overrides the game clock.
  * out.bin = header, mesh verts, sprite verts, shadow verts, light, 2 atlases. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
+#include <string.h>
 #include "../source/world.h"
+#include "../source/battle.h"
+#include "../source/frpics.h"
 
 static uint8_t *dump;
 static uint8_t peek(void *ctx, uint16_t a) { (void)ctx; return a >= 0x8000 ? dump[a - 0x8000] : 0; }
+
+static FILE *fr;
+static bool fr_read(void *c, uint32_t off, void *buf, size_t n) {
+	(void)c; return fseek(fr, off, SEEK_SET) == 0 && fread(buf, 1, n, fr) == n;
+}
 
 static uint8_t *slurp(const char *p, long *n) {
 	FILE *f = fopen(p, "rb"); if (!f) { perror(p); exit(1); }
@@ -40,6 +50,39 @@ int main(int argc, char **argv) {
 	world_bg_atlas(&g, bg); world_obj_atlas(&g, obj);
 	fprintf(stderr, "%02d:%02d ok=%d verts=%d buildings=%d sprites=%d shadows=%d sun=(%.2f %.2f %.2f) shadow=%.2f\n",
 	        hour, minute, ok, m.count, m.buildings, ns, nsh, L.sun[0], L.sun[1], L.sun[2], L.shadow);
+	/* optional fake battle */
+	float cam[5] = { cx + 8, cz + 8, 0, 0.72f, 215 };
+	static WVert bq[12], bs[12];
+	static uint32_t btex[BATTLE_TEX_W * BATTLE_TEX_H];
+	int nbq = 0, nbs = 0;
+	if (argc > 8) {
+		fr = fopen(argv[6], "rb");
+		uint8_t h[0xC0];
+		if (!fr || fread(h, 1, sizeof h, fr) != sizeof h) { perror(argv[6]); return 1; }
+		const FrTables *t = fr_tables(h, sizeof h);
+		if (!t) { fprintf(stderr, "not FireRed/LeafGreen\n"); return 1; }
+		int en = atoi(argv[7]), al = atoi(argv[8]);
+		dump[wBattleMode - 0x8000] = 1;
+		dump[wEnemyMonSpecies - 0x8000] = en; dump[wEnemyMonHP - 0x8000 + 1] = 20;
+		dump[wBattleMonSpecies - 0x8000] = 0;
+		Battle b; battle_begin(&b, &g, cx, cz);
+		for (int i = 0; i < 20; i++) battle_update(&b, &g);
+		dump[wBattleMonSpecies - 0x8000] = al; dump[wBattleMonHP - 0x8000 + 1] = 20;
+		for (int i = 0; i < 20; i++) battle_update(&b, &g);
+		static uint32_t pic[FR_PIC * FR_PIC];
+		BattlePic pe = battle_enemy_pic(&b), pa = battle_ally_pic(&b);
+		if (pe.species && fr_mon_pic(fr_read, NULL, t, pe.species, false, pe.shiny, pic, &b.enemy_bottom))
+			for (int y = 0; y < 64; y++) memcpy(btex + y * BATTLE_TEX_W, pic + y * 64, 64 * 4);
+		bool ok2 = pa.red ? fr_red_back(fr_read, NULL, t, pic, &b.ally_bottom)
+		                  : fr_mon_pic(fr_read, NULL, t, pa.species, true, pa.shiny, pic, &b.ally_bottom);
+		if (ok2) for (int y = 0; y < 64; y++) memcpy(btex + y * BATTLE_TEX_W + 64, pic + y * 64, 64 * 4);
+		battle_camera(&b, &cam[0], &cam[1], &cam[2], &cam[3], &cam[4]);
+		nbq = battle_quads(&b, cam[2], bq, 12);
+		nbs = battle_shadows(&b, bs, 12);
+		ns = 0; nsh = 0;   /* overworld sprites are hidden during battles */
+		fprintf(stderr, "battle: %s, enemy %d ally %d, quads %d\n", t->name, b.enemy, b.ally, nbq);
+	}
+
 	FILE *o = fopen(argv[3], "wb");
 	int32_t hdr[6] = { m.count, ns, nsh, (int32_t)cx, (int32_t)cz, (int32_t)L.sky };
 	fwrite(hdr, 4, 6, o);
@@ -49,6 +92,11 @@ int main(int argc, char **argv) {
 	fwrite(spr, sizeof(WVert), ns, o);
 	fwrite(shd, sizeof(WVert), nsh, o);
 	fwrite(bg, 4, 128 * 128, o); fwrite(obj, 4, 128 * 128, o);
+	fwrite(cam, 4, 5, o);
+	int32_t bn[2] = { nbq, nbs };
+	fwrite(bn, 4, 2, o);
+	fwrite(bq, sizeof(WVert), nbq, o); fwrite(bs, sizeof(WVert), nbs, o);
+	fwrite(btex, 4, BATTLE_TEX_W * BATTLE_TEX_H, o);
 	fclose(o);
 	return 0;
 }

@@ -15,10 +15,13 @@ battles stay readable.
 3. Copy it to `/3ds/gold3ds/Gold3DS.3dsx` on the SD card.
 4. Copy your Pokémon Gold (USA/Europe) ROM to `/3ds/gold3ds/gold.gbc`.
 5. Launch **Gold 3DS** from the Homebrew Launcher. Saves go to `/3ds/gold3ds/gold.sav`.
-6. Optional, for a taller player: copy your own Pokémon FireRed or LeafGreen
-   ROM (English, v1.0 or v1.1) to `/3ds/gold3ds/firered.gba`. At startup the
-   app reads Red's walking sprite from it and uses it for the player in 3D.
-   Without it, the normal Gold sprite is used. Biking and surfing keep the Gold sprite.
+6. Optional: copy your own Pokémon FireRed or LeafGreen ROM (English, v1.0 or
+   v1.1) to `/3ds/gold3ds/firered.gba`. This turns on:
+   - **a taller player**: Red's walking sprite, read from that ROM, replaces the
+     player in 3D (biking and surfing keep the Gold sprite);
+   - **3D battles**: see below.
+   Without it, the player uses the Gold sprite and battles show the original
+   picture on both screens.
 
 The app checks the ROM header and refuses other versions, since the memory
 addresses it reads are specific to this release.
@@ -47,6 +50,19 @@ Lighting follows the game's own clock (the one you set at the start of Gold):
 - The player and NPCs have soft shadows under their feet.
 - Indoors and in caves the light comes from above instead.
 
+## Battles in 3D
+
+With FireRed/LeafGreen on the SD card, battles happen in the world. When a
+battle starts the camera swings down beside the player, and both Pokémon
+appear standing on open ground nearby, drawn with FireRed's pictures (front for
+the opponent, back for yours, shiny colours when Gold's rules say so). The
+bottom screen keeps Gold's own battle screen for moves, HP and text.
+
+- A wild Pokémon is there from the start; a trainer's appears when sent out.
+- Red stands in your Pokémon's place until you send one out.
+- Pokémon grow in when sent out, shake when hit and sink away when they faint.
+- Lighting and shadows follow the time of day, as in the overworld.
+
 ## How it works
 
 - `source/core.c` runs the game with the [Peanut-GB](https://github.com/deltabeard/Peanut-GB) emulator core (MIT).
@@ -61,10 +77,12 @@ Lighting follows the game's own clock (the one you set at the start of Gold):
   sky and tint; shadows are baked into the mesh by tracing toward the sun.
 - `source/render.c` draws it with citro3d, culled to the squares around the
   player, plus the player and NPC sprites as upright cut-outs.
+- `source/battle.c` stages battles in the world from Gold's battle memory;
+  `source/frpics.c` decompresses FireRed's pictures (LZ77, 4bpp) at runtime.
 - Memory addresses come from [pret/pokegold](https://github.com/pret/pokegold)'s symbol file.
 
 `tools/pctest.c` builds the same mesh on a PC from a RAM dump, for testing
-without a console.
+without a console, and can fake a battle with FireRed's pictures.
 
 ## Build
 

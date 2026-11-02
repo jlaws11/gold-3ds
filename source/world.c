@@ -394,6 +394,12 @@ bool world_build(const GoldView *g, WorldMesh *m, const Light *light) {
 	return m->count < m->cap;
 }
 
+bool world_open(float x, float z) {
+	int gx = (int)floorf(x / 16) + GO, gy = (int)floorf(z / 16) + GO;
+	if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) return false;
+	return cls[gy][gx] == CL_GROUND || cls[gy][gx] == CL_GRASS;
+}
+
 void world_row_range(const WorldMesh *m, int y, int x0, int x1, int *first, int *count) {
 	*first = 0; *count = 0;
 	if (y < 0 || y >= m->sq_h || m->sq_w == 0) return;

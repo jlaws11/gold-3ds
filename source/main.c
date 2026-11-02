@@ -10,7 +10,8 @@
  * The camera is fixed: it follows the player from the south, like the original.
  * Lighting follows the game's clock: moving sun and shadows, sunset, lit windows at night.
  * Optional: put your own FireRed/LeafGreen ROM at /3ds/gold3ds/firered.gba for a
- * taller player sprite (Red), read from that ROM at startup.
+ * taller player sprite (Red) and 3D battles: the camera swings down and both
+ * Pokémon appear in the world, using FireRed's pictures read from that ROM.
  */
 #include <3ds.h>
 #include <stdio.h>
@@ -24,6 +25,8 @@
 #include "render.h"
 #include "light.h"
 #include "tallsprite.h"
+#include "frpics.h"
+#include "battle.h"
 
 #define APP_DIR  "sdmc:/3ds/gold3ds"
 #define ROM_PATH APP_DIR "/gold.gbc"
@@ -67,21 +70,47 @@ static void fatal(const char *msg) {
 #define CAM_PITCH 0.72f    /* about 41 degrees above the ground */
 #define CAM_DIST  215.0f
 
-/* Read Red's sprite sheet from the player's own FireRed/LeafGreen, if present. */
+/* The player's own FireRed/LeafGreen, kept open for reading pictures on demand. */
+static FILE *gba;
+static bool gba_read(void *ctx, uint32_t off, void *buf, size_t n) {
+	(void)ctx;
+	return gba && fseek(gba, off, SEEK_SET) == 0 && fread(buf, 1, n, gba) == n;
+}
+
+/* Red's walking sprite sheet from that ROM. */
 static bool load_tall_sprite(void) {
-	FILE *f = fopen(TALL_PATH, "rb");
-	if (!f) return false;
 	static uint8_t hdr[0xC0], pal[TALL_PAL_SIZE], pic[TALL_PIC_SIZE];
 	static uint32_t sheet[TALL_TEX_W * TALL_TEX_H];
-	bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr;
-	const TallSource *src = ok ? tall_source(hdr, sizeof hdr) : NULL;
-	ok = src && fseek(f, src->pal, SEEK_SET) == 0 && fread(pal, 1, sizeof pal, f) == sizeof pal
-	         && fseek(f, src->pic, SEEK_SET) == 0 && fread(pic, 1, sizeof pic, f) == sizeof pic;
-	fclose(f);
-	if (!ok) return false;
+	if (!gba_read(NULL, 0, hdr, sizeof hdr)) return false;
+	const TallSource *src = tall_source(hdr, sizeof hdr);
+	if (!src || !gba_read(NULL, src->pal, pal, sizeof pal) || !gba_read(NULL, src->pic, pic, sizeof pic)) return false;
 	tall_decode(pal, pic, sheet);
 	render_tall_sheet(sheet);
 	return true;
+}
+
+/* Load the two battle pictures into the battle texture when they change. */
+static void load_battle_pics(const FrTables *t, Battle *b) {
+	static BattlePic shown[2] = { { -1, 0, 0, 0 }, { -1, 0, 0, 0 } };
+	static uint32_t tex[BATTLE_TEX_W * BATTLE_TEX_H], pic[FR_PIC * FR_PIC];
+	BattlePic want[2] = { battle_enemy_pic(b), battle_ally_pic(b) };
+	bool changed = false;
+	for (int i = 0; i < 2; i++) {
+		if (want[i].species == shown[i].species && want[i].back == shown[i].back &&
+		    want[i].shiny == shown[i].shiny && want[i].red == shown[i].red) continue;
+		int bottom = 63;
+		bool ok = want[i].red ? fr_red_back(gba_read, NULL, t, pic, &bottom)
+		        : want[i].species ? fr_mon_pic(gba_read, NULL, t, want[i].species, want[i].back, want[i].shiny, pic, &bottom)
+		        : false;
+		for (int y = 0; y < FR_PIC; y++) {
+			uint32_t *dst = tex + y * BATTLE_TEX_W + i * FR_PIC;
+			if (ok) memcpy(dst, pic + y * FR_PIC, FR_PIC * 4); else memset(dst, 0, FR_PIC * 4);
+		}
+		if (i == 0) b->enemy_bottom = bottom; else b->ally_bottom = bottom;
+		shown[i] = want[i];
+		changed = true;
+	}
+	if (changed) render_battle_sheet(tex);
 }
 
 static float approach(float cur, float target) {
@@ -91,6 +120,8 @@ static float approach(float cur, float target) {
 	if (fabsf(d) <= step) return target;
 	return cur + (d > 0 ? step : -step);
 }
+
+static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 
 int main(void) {
 	gfxInitDefault();
@@ -110,14 +141,27 @@ int main(void) {
 	core_set_clock(localtime(&now));
 
 	render_init();
-	bool tall = load_tall_sprite();
-	float walked = 0;    /* distance walked, drives the step animation */
-	int idle = 99;       /* frames since the camera last moved */
+	gba = fopen(TALL_PATH, "rb");
+	const FrTables *frt = NULL;
+	bool tall = false;
+	if (gba) {
+		uint8_t hdr[0xC0];
+		if (gba_read(NULL, 0, hdr, sizeof hdr)) frt = fr_tables(hdr, sizeof hdr);
+		tall = load_tall_sprite();
+		if (!frt && !tall) { fclose(gba); gba = NULL; }
+	}
+
 	GoldView g = { rom, rom_size, core_peek, NULL };
 	WorldMesh *mesh = render_mesh();
 	static uint32_t atlas[128 * 128];
 
-	Camera cam = { 0, 0, CAM_PITCH, CAM_DIST };
+	float pl_x = 0, pl_z = 0;     /* where the player is drawn (smoothed), world pixels */
+	float zoom = CAM_DIST;
+	float walked = 0;             /* distance walked, drives the step animation */
+	int idle = 99;                /* frames since the player last moved */
+	Battle battle = { 0 };
+	float bt = 0;                 /* 0 = overworld camera, 1 = battle camera */
+	Camera cam = { 0, 0, 0, CAM_PITCH, CAM_DIST };
 	Light light;
 	light_compute(12, 0, ENV_OUTDOOR, &light);
 	bool voxel = true;
@@ -139,12 +183,13 @@ int main(void) {
 		if (held & KEY_RIGHT)  b |= BTN_RIGHT;
 
 		if (down & KEY_X) voxel = !voxel;
-		if (held & KEY_ZL) cam.dist = fminf(320, cam.dist + 2);
-		if (held & KEY_ZR) cam.dist = fmaxf(130, cam.dist - 2);
+		if (held & KEY_ZL) zoom = fminf(320, zoom + 2);
+		if (held & KEY_ZR) zoom = fmaxf(130, zoom - 2);
 
 		core_frame(b);
 
-		bool overworld = gv8(&g, wMapStatus) == MAPSTATUS_HANDLE && gv8(&g, wBattleMode) == 0 && gv8(&g, wMapGroup) != 0;
+		bool in_battle = gv8(&g, wBattleMode) != 0;
+		bool overworld = gv8(&g, wMapStatus) == MAPSTATUS_HANDLE && !in_battle && gv8(&g, wMapGroup) != 0;
 		if (overworld) {
 			light_compute(gv8(&g, hHours), gv8(&g, hMinutes), light_env(gv8(&g, wEnvironment)), &light);
 			if (world_key(&g) != mesh->key || light.key != mesh->light_key) {
@@ -162,28 +207,51 @@ int main(void) {
 					world_obj_atlas(&g, atlas); render_obj_atlas(atlas);
 				}
 			}
-			float ox = cam.x, oz = cam.z;
-			cam.x = approach(cam.x, gv8(&g, wXCoord) * 16.0f);
-			cam.z = approach(cam.z, gv8(&g, wYCoord) * 16.0f);
-			float moved = fabsf(cam.x - ox) + fabsf(cam.z - oz);
+			float ox = pl_x, oz = pl_z;
+			pl_x = approach(pl_x, gv8(&g, wXCoord) * 16.0f);
+			pl_z = approach(pl_z, gv8(&g, wYCoord) * 16.0f);
+			float moved = fabsf(pl_x - ox) + fabsf(pl_z - oz);
 			if (moved > 0 && moved < 8) { walked += moved; idle = 0; } else idle++;
 		}
-		int cap, nspr = 0, nshadow = 0;
-		WVert *sbuf = render_sprite_buf(&cap);
-		/* tall player only when walking: the Gold sprite still shows bike and surf */
-		bool tall_now = tall && overworld && gv8(&g, wPlayerState) == 0;
-		if (overworld) nspr = world_sprites(&g, cam.x, cam.z, tall_now, sbuf, cap);
-		int nplayer = 0;
-		if (tall_now) {
-			bool flip;
-			int fr = tall_frame(gv8(&g, wPlayerDirection), ((int)(walked / 8)) & 3, idle < 3, &flip);
-			nplayer = world_tall_player(cam.x, cam.z, fr, flip, render_player_buf());
+
+		/* 3D battles need FireRed's pictures and a world to stand in */
+		bool battle3d = in_battle && frt && mesh->count > 0;
+		if (battle3d) {
+			if (!battle.active) battle_begin(&battle, &g, pl_x, pl_z);
+			battle_update(&battle, &g);
+			load_battle_pics(frt, &battle);
+		} else {
+			battle.active = false;
 		}
+		bt = fminf(1, fmaxf(0, bt + (battle3d ? 0.05f : -0.05f)));
+		float s = bt * bt * (3 - 2 * bt);
+		float btx = pl_x + 8, btz = pl_z + 8, byaw = 0, bpitch = CAM_PITCH, bdist = zoom;
+		if (battle.active || bt > 0) battle_camera(&battle, &btx, &btz, &byaw, &bpitch, &bdist);
+		cam.tx = lerp(pl_x + 8, btx, s); cam.tz = lerp(pl_z + 8, btz, s);
+		cam.yaw = lerp(0, byaw, s); cam.pitch = lerp(CAM_PITCH, bpitch, s); cam.dist = lerp(zoom, bdist, s);
+
+		int cap, nspr = 0, nshadow = 0, nplayer = 0, nbattle = 0;
 		WVert *shbuf = render_shadow_buf(&cap);
-		if (overworld) nshadow = world_sprite_shadows(&g, cam.x, cam.z, shbuf, cap);
+		if (battle.active) {
+			nshadow = battle_shadows(&battle, shbuf, cap);
+			nbattle = battle_quads(&battle, cam.yaw, render_battle_buf(), 12);
+		} else if (overworld) {
+			WVert *sbuf = render_sprite_buf(&cap);
+			/* tall player only when walking: the Gold sprite still shows bike and surf */
+			bool tall_now = tall && gv8(&g, wPlayerState) == 0;
+			nspr = world_sprites(&g, pl_x, pl_z, tall_now, sbuf, cap);
+			if (tall_now) {
+				bool flip;
+				int fr = tall_frame(gv8(&g, wPlayerDirection), ((int)(walked / 8)) & 3, idle < 3, &flip);
+				nplayer = world_tall_player(pl_x, pl_z, fr, flip, render_player_buf());
+			}
+			WVert *sh2 = render_shadow_buf(&cap);
+			nshadow = world_sprite_shadows(&g, pl_x, pl_z, sh2, cap);
+		}
 
 		render_lcd(core_lcd());
-		render_frame(voxel && overworld && mesh->count > 0, &cam, nspr, nshadow, nplayer, &light);
+		bool show3d = voxel && (overworld || battle.active) && mesh->count > 0;
+		render_frame(show3d, &cam, nspr, nshadow, nplayer, nbattle, &light);
 
 		/* save once the game's save data has changed and then stayed still for 2 seconds */
 		if (++frame % 120 == 0) {
@@ -194,6 +262,7 @@ int main(void) {
 	}
 
 	if (core_sram_hash() != saved_hash) save_sram();
+	if (gba) fclose(gba);
 	render_exit();
 	gfxExit();
 	free(rom);
