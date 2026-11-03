@@ -182,10 +182,17 @@ static void put(WorldMesh *m, P3 p, float u, float v, float s, float glow) {
 	o->x = p.x; o->y = p.y; o->z = p.z; o->u = u; o->v = v; o->shade = s; o->glow = glow;
 }
 
+/* UV of a background tile (0-255), or its see-through copy (CUTOUT + 0-255) */
+static void bg_uv(int tile, float *u0, float *v0, float *u1, float *v1) {
+	const float eu = 0.02f / BG_ATLAS_W, ev = 0.02f / BG_ATLAS_H;
+	*u0 = (tile % 16) * 8 / (float)BG_ATLAS_W + eu; *u1 = *u0 + 8.0f / BG_ATLAS_W - 2 * eu;
+	*v0 = (tile / 16) * 8 / (float)BG_ATLAS_H + ev; *v1 = *v0 + 8.0f / BG_ATLAS_H - 2 * ev;
+}
+
 /* a=top-left b=top-right c=bottom-right d=bottom-left (as the tile is drawn); one shade per corner */
 static void quad4(WorldMesh *m, P3 a, P3 b, P3 c, P3 d, int tile, float sa, float sb, float sc, float sd, float glow) {
 	if (!room(m, 6)) return;
-	float u0, v0, u1, v1; atlas_uv(tile, &u0, &v0, &u1, &v1);
+	float u0, v0, u1, v1; bg_uv(tile, &u0, &v0, &u1, &v1);
 	put(m, a, u0, v0, sa, glow); put(m, d, u0, v1, sd, glow); put(m, c, u1, v1, sc, glow);
 	put(m, a, u0, v0, sa, glow); put(m, c, u1, v1, sc, glow); put(m, b, u1, v0, sb, glow);
 }
@@ -196,7 +203,7 @@ static void quad(WorldMesh *m, P3 a, P3 b, P3 c, P3 d, int tile, float shade) {
 
 static void tri(WorldMesh *m, P3 a, P3 b, P3 c, int tile, float shade) {
 	if (!room(m, 3)) return;
-	float u0, v0, u1, v1; atlas_uv(tile, &u0, &v0, &u1, &v1);
+	float u0, v0, u1, v1; bg_uv(tile, &u0, &v0, &u1, &v1);
 	put(m, a, u0, v1, shade, 0); put(m, b, (u0 + u1) / 2, v0, shade, 0); put(m, c, u1, v1, shade, 0);
 }
 
@@ -253,6 +260,28 @@ static void emit_tree(WorldMesh *m, float X, float Z, const uint8_t t[4], int gx
 	P3 apex = p3(cx, CROWN_APEX * k, cz);
 	float cl = lambert(0, 1, 0);
 	for (int s = 0; s < TREE_SEG; s++) tri(m, ring[3][s], apex, ring[3][s + 1], t[s & 1], cl);
+}
+
+/* Tall grass: clumps of upright blades cut out of the grass tile itself, two
+ * crossed cards per clump, so characters wading through are hidden to the knees
+ * like in the original. Darker at the roots; shaded by the sun. */
+static void emit_grass(WorldMesh *m, float X, float Z, const uint8_t t[4], int gx, int gy) {
+	static const float spot[4][2] = { { 4, 4 }, { 12, 4 }, { 4, 12 }, { 12, 12 } };
+	for (int k = 0; k < 4; k++) {
+		uint32_t h = sq_hash(gx * 4 + k, gy);
+		float cx = X + spot[k][0] + ((h & 3) - 1.5f) * 0.8f;
+		float cz = Z + spot[k][1] + (((h >> 2) & 3) - 1.5f) * 0.8f;
+		float ht = 8.0f + ((h >> 4) & 3) * 0.7f;        /* 8-10 px: about knee height on Red */
+		float w = 9.0f, a = 0.785f + ((h >> 6) & 3) * 0.12f;
+		int tile = CUTOUT + t[k];
+		float lit = lambert(0, 0.6f, 0.8f), dark = lit * (1.0f - LT->shadow);
+		float top = in_shadow(cx, ht, cz, 2) ? dark : lit, root = (in_shadow(cx, 0, cz, 2) ? dark : lit) * 0.62f;
+		for (int c = 0; c < 2; c++) {
+			float ang = a + c * 1.5708f, dx = cosf(ang) * w / 2, dz = sinf(ang) * w / 2;
+			quad4(m, p3(cx - dx, ht, cz - dz), p3(cx + dx, ht, cz + dz),
+			         p3(cx + dx, 0, cz + dz), p3(cx - dx, 0, cz - dz), tile, top, top, root, root, 0);
+		}
+	}
 }
 
 /* ---- the build --------------------------------------------------------- */
@@ -372,6 +401,7 @@ bool world_build(const GoldView *g, WorldMesh *m, const Light *light) {
 		const int h = hgt[gy][gx];
 		top_face(m, X, Z, (float)h, t, cls[gy][gx] == CL_TREE ? 0.62f : 1.0f);
 		if (cls[gy][gx] == CL_TREE) emit_tree(m, X, Z, t, gx, gy);
+		if (cls[gy][gx] == CL_GRASS) emit_grass(m, X, Z, t, gx, gy);
 		/* sides wherever a neighbour is lower, lit by how much they face the sun */
 		static const int nd[4][2] = { {0,1}, {1,0}, {-1,0}, {0,-1} };   /* S E W N */
 		for (int k = 0; k < 4; k++) {
@@ -431,8 +461,9 @@ void world_bg_atlas(const GoldView *g, uint32_t *rgba) {
 		int p = tile_pal(g, palmap, t);
 		for (int row = 0; row < 8; row++) {
 			uint8_t px[8]; tile_row(g, base, row, px);
-			uint32_t *dst = rgba + ((t / 16) * 8 + row) * 128 + (t % 16) * 8;
-			for (int x = 0; x < 8; x++) dst[x] = pal[p][px[x]];
+			uint32_t *dst = rgba + ((t / 16) * 8 + row) * BG_ATLAS_W + (t % 16) * 8;
+			uint32_t *cut = dst + 128 * BG_ATLAS_W;   /* same tile in the bottom half, colour 0 see-through */
+			for (int x = 0; x < 8; x++) { dst[x] = pal[p][px[x]]; cut[x] = px[x] ? pal[p][px[x]] : 0; }
 		}
 	}
 }

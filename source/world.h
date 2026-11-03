@@ -39,8 +39,13 @@ bool world_open(float x, float z);
 /* Vertex range for grid squares [x0,x1] in row y (clamped). */
 void world_row_range(const WorldMesh *m, int y, int x0, int x1, int *first, int *count);
 
-/* 128x128 RGBA atlas of the 256 BG tile numbers, coloured with Gold's own GBC
- * palettes for the current time of day. Row-major, top row first. */
+/* BG_ATLAS_W x BG_ATLAS_H RGBA atlas of the 256 BG tile numbers, coloured with Gold's
+ * own GBC palettes for the current time of day. Row-major, top row first.
+ * The top half is the tiles as drawn; the bottom half repeats them with colour 0
+ * see-through, for cut-outs such as grass blades (tile numbers 256-511). */
+#define BG_ATLAS_W 128
+#define BG_ATLAS_H 256
+#define CUTOUT 256
 void world_bg_atlas(const GoldView *g, uint32_t *rgba);
 
 /* 128x128 RGBA atlas of the 256 sprite tiles (0x8000-0x8FFF), colour 0 transparent. */

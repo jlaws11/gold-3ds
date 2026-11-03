@@ -90,6 +90,7 @@ bottom screen keeps Gold's own battle screen for moves, HP and text.
   (`wOverworldMapBlocks`), the tileset's metatiles and collision from the ROM,
   and the tile graphics from VRAM, then builds a textured mesh: raised trees,
   fences and ledges, sunken water, rounded eight-sided tree crowns on trunks,
+  tall grass as clumps of upright blades cut from the grass tile,
   and houses whose wall art becomes the front
   facade under a gable roof made from the roof tiles. Colours are Gold's own
   Game Boy Color palettes for the current time of day.

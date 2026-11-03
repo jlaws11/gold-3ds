@@ -1,5 +1,6 @@
 /* PC check for world.c + light.c: builds the same mesh the 3DS draws, from a RAM dump.
- * Usage: pctest rom.gbc dump.bin out.bin [hour minute [firered.gba enemy ally]]
+ * Usage: pctest rom.gbc dump.bin out.bin [hour minute [firered.gba [enemy ally]]]
+ *   with firered.gba alone: the player is drawn as Red, like on the 3DS
  *   with firered.gba: fakes a wild battle against `enemy` with `ally` out, as the 3DS draws it
  * dump.bin = bytes of 0x8000-0xFFFF. The optional time overrides the game clock.
  * out.bin = header, mesh verts, sprite verts, shadow verts, light, 2 atlases. */
@@ -10,6 +11,7 @@
 #include "../source/world.h"
 #include "../source/battle.h"
 #include "../source/frpics.h"
+#include "../source/tallsprite.h"
 
 static uint8_t *dump;
 static uint8_t peek(void *ctx, uint16_t a) { (void)ctx; return a >= 0x8000 ? dump[a - 0x8000] : 0; }
@@ -46,7 +48,7 @@ int main(int argc, char **argv) {
 	static WVert spr[40 * 6], shd[40 * 6];
 	int ns = world_sprites(&g, cx, cz, false, spr, 40 * 6);
 	int nsh = world_sprite_shadows(&g, cx, cz, shd, 40 * 6);
-	static uint32_t bg[128 * 128], obj[128 * 128];
+	static uint32_t bg[BG_ATLAS_W * BG_ATLAS_H], obj[128 * 128];
 	world_bg_atlas(&g, bg); world_obj_atlas(&g, obj);
 	fprintf(stderr, "%02d:%02d ok=%d verts=%d buildings=%d sprites=%d shadows=%d sun=(%.2f %.2f %.2f) shadow=%.2f\n",
 	        hour, minute, ok, m.count, m.buildings, ns, nsh, L.sun[0], L.sun[1], L.sun[2], L.shadow);
@@ -55,6 +57,18 @@ int main(int argc, char **argv) {
 	static WVert bq[12], bs[12];
 	static uint32_t btex[BATTLE_TEX_W * BATTLE_TEX_H];
 	int nbq = 0, nbs = 0;
+	if (argc == 7) {   /* overworld with the tall player: Red's south frame in the battle texture's right half */
+		fr = fopen(argv[6], "rb");
+		uint8_t h[0xC0], pal[TALL_PAL_SIZE], pic[TALL_PIC_SIZE];
+		static uint32_t sheet[TALL_TEX_W * TALL_TEX_H];
+		const TallSource *src = fr && fread(h, 1, sizeof h, fr) == sizeof h ? tall_source(h, sizeof h) : NULL;
+		if (!src || !fr_read(NULL, src->pal, pal, sizeof pal) || !fr_read(NULL, src->pic, pic, sizeof pic)) { fprintf(stderr, "no FireRed\n"); return 1; }
+		tall_decode(pal, pic, sheet);
+		for (int y = 0; y < 32; y++) memcpy(btex + y * BATTLE_TEX_W + 64, sheet + y * TALL_TEX_W, 16 * 4);
+		ns = world_sprites(&g, cx, cz, true, spr, 40 * 6);
+		nbq = world_tall_player(cx, cz, 0, false, bq);
+		for (int i = 0; i < nbq; i++) { bq[i].u = bq[i].u < 0.03f ? 64 / 128.0f : 80 / 128.0f; bq[i].v *= 0.5f; }
+	}
 	if (argc > 8) {
 		fr = fopen(argv[6], "rb");
 		uint8_t h[0xC0];
@@ -91,7 +105,7 @@ int main(int argc, char **argv) {
 	fwrite(m.verts, sizeof(WVert), m.count, o);
 	fwrite(spr, sizeof(WVert), ns, o);
 	fwrite(shd, sizeof(WVert), nsh, o);
-	fwrite(bg, 4, 128 * 128, o); fwrite(obj, 4, 128 * 128, o);
+	fwrite(bg, 4, BG_ATLAS_W * BG_ATLAS_H, o); fwrite(obj, 4, 128 * 128, o);
 	fwrite(cam, 4, 5, o);
 	int32_t bn[2] = { nbq, nbs };
 	fwrite(bn, 4, 2, o);

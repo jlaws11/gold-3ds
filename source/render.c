@@ -86,7 +86,7 @@ void render_init(void) {
 	C3D_CullFace(GPU_CULL_NONE);
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
 
-	tex_new(&tex_bg, 128, 128);
+	tex_new(&tex_bg, BG_ATLAS_W, BG_ATLAS_H);
 	tex_new(&tex_obj, 128, 128);
 	tex_new(&tex_lcd, 256, 256);
 	tex_new(&tex_blob, 16, 16);
@@ -135,7 +135,7 @@ void render_exit(void) {
 
 WorldMesh *render_mesh(void) { return &mesh; }
 void render_mesh_uploaded(void) { GSPGPU_FlushDataCache(mesh.verts, sizeof(WVert) * mesh.count); }
-void render_bg_atlas(const uint32_t *rgba) { upload(&tex_bg, rgba, 128, 128, 128); }
+void render_bg_atlas(const uint32_t *rgba) { upload(&tex_bg, rgba, BG_ATLAS_W, BG_ATLAS_H, BG_ATLAS_W); }
 void render_obj_atlas(const uint32_t *rgba) { upload(&tex_obj, rgba, 128, 128, 128); }
 WVert *render_sprite_buf(int *cap) { *cap = SPRITE_CAP; return spr; }
 WVert *render_shadow_buf(int *cap) { *cap = SPRITE_CAP; return shadows; }

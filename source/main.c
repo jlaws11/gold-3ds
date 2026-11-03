@@ -175,7 +175,7 @@ int main(void) {
 
 	GoldView g = { rom, rom_size, core_peek, NULL };
 	WorldMesh *mesh = render_mesh();
-	static uint32_t atlas[128 * 128];
+	static uint32_t atlas[BG_ATLAS_W * BG_ATLAS_H];   /* also used for the 128x128 sprite atlas */
 
 	float pl_x = 0, pl_z = 0;     /* where the player is drawn (smoothed), world pixels */
 	float zoom = CAM_DIST;
