@@ -12,7 +12,7 @@
 	 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
 	 GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-#define MESH_CAP   240000
+#define MESH_CAP   360000   /* the largest Gold map (Ilex Forest) needs about 295,000 */
 #define SPRITE_CAP (40 * 6)
 
 static C3D_RenderTarget *top_l, *top_r, *bottom;
@@ -22,7 +22,11 @@ static int u_proj, u_mv, u_amb, u_glow;
 static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob, tex_tall, tex_battle, tex_dim, tex_ui;
 static bool ui_ready;
 static WVert *ui_quads;   /* double-buffered like the overlay */
-static WorldMesh mesh;
+static WorldMesh meshes[2];   /* drawn one and the one being built (when memory allows) */
+static int cur_mesh;
+static bool two_meshes, mesh_hidden;
+static float mesh_dx, mesh_dz;  /* shift for drawing the old map while the new one builds */
+#define mesh (meshes[cur_mesh])
 static WVert *spr, *shadows, *player, *battle_q, *screen_quads, *ov_quads;
 static int ov_flip;
 static uint32_t *lcd_rgba;
@@ -112,9 +116,13 @@ void render_init(void) {
 		upload(&tex_blob, blob, 16, 16, 16);
 	}
 
-	mesh.cap = MESH_CAP;
-	mesh.verts = linearAlloc(sizeof(WVert) * MESH_CAP);
-	mesh.count = 0; mesh.sq_w = mesh.sq_h = 0; mesh.key = 0;
+	for (int i = 0; i < 2; i++) {
+		meshes[i].cap = MESH_CAP;
+		meshes[i].verts = linearAlloc(sizeof(WVert) * MESH_CAP);
+		meshes[i].count = 0; meshes[i].sq_w = meshes[i].sq_h = 0; meshes[i].key = 0;
+	}
+	two_meshes = meshes[1].verts != NULL;
+	if (!meshes[0].verts) svcBreak(USERBREAK_PANIC);
 	spr = linearAlloc(sizeof(WVert) * SPRITE_CAP);
 	shadows = linearAlloc(sizeof(WVert) * SPRITE_CAP);
 	player = linearAlloc(sizeof(WVert) * 6);
@@ -130,15 +138,26 @@ void render_init(void) {
 
 void render_exit(void) {
 	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob); C3D_TexDelete(&tex_tall); C3D_TexDelete(&tex_battle); C3D_TexDelete(&tex_dim); linearFree(ov_quads); linearFree(ui_quads);
-	if (ui_ready) C3D_TexDelete(&tex_ui); linearFree(player); linearFree(battle_q);
-	linearFree(mesh.verts); linearFree(spr); linearFree(shadows); linearFree(screen_quads); linearFree(lcd_rgba);
+	if (ui_ready) C3D_TexDelete(&tex_ui);
+	linearFree(player); linearFree(battle_q);
+	linearFree(meshes[0].verts); if (meshes[1].verts) linearFree(meshes[1].verts); linearFree(spr); linearFree(shadows); linearFree(screen_quads); linearFree(lcd_rgba);
 	shaderProgramFree(&prog);
 	DVLB_Free(dvlb);
 	C3D_Fini();
 }
 
 WorldMesh *render_mesh(void) { return &mesh; }
+WorldMesh *render_mesh_back(void) { return two_meshes ? &meshes[cur_mesh ^ 1] : &mesh; }
+bool render_can_build_behind(void) { return two_meshes; }
 void render_mesh_uploaded(void) { GSPGPU_FlushDataCache(mesh.verts, sizeof(WVert) * mesh.count); }
+void render_mesh_swap(void) {
+	WorldMesh *b = render_mesh_back();
+	GSPGPU_FlushDataCache(b->verts, sizeof(WVert) * b->count);
+	if (two_meshes) cur_mesh ^= 1;
+	mesh_dx = mesh_dz = 0; mesh_hidden = false;
+}
+void render_mesh_shift(float dx, float dz) { mesh_dx = dx; mesh_dz = dz; }
+void render_mesh_hide(bool hide) { mesh_hidden = hide; }
 void render_bg_atlas(const uint32_t *rgba) { upload(&tex_bg, rgba, BG_ATLAS_W, BG_ATLAS_H, BG_ATLAS_W); }
 void render_obj_atlas(const uint32_t *rgba) { upload(&tex_obj, rgba, 128, 128, 128); }
 WVert *render_sprite_buf(int *cap) { *cap = SPRITE_CAP; return spr; }
@@ -182,10 +201,15 @@ static void draw_world(const Camera *cam, float iod, int sprite_verts, int shado
 	C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
 	C3D_AlphaTest(true, GPU_GREATER, 0x80);
 
+	if (mesh_hidden) return;   /* a warp: the new map is still being built */
+
 	/* only the squares around the player: whole rows of the grid are contiguous */
+	C3D_Mtx mvm = mv;
+	Mtx_Translate(&mvm, mesh_dx, 0, mesh_dz, true);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_mv, &mvm);
 	C3D_TexBind(0, &tex_bg);
 	use_buffer(mesh.verts);
-	int gx = (int)floorf(cam->tx / 16) + mesh.origin, gy = (int)floorf(cam->tz / 16) + mesh.origin;
+	int gx = (int)floorf((cam->tx - mesh_dx) / 16) + mesh.origin, gy = (int)floorf((cam->tz - mesh_dz) / 16) + mesh.origin;
 	int spread = 14 + (int)(cam->dist / 60);
 	/* looking north: most of the view is ahead; a turned (battle) camera needs all round */
 	int behind = fabsf(cam->yaw) > 0.05f ? spread : 7;
@@ -194,6 +218,7 @@ static void draw_world(const Camera *cam, float iod, int sprite_verts, int shado
 		world_row_range(&mesh, y, gx - spread, gx + spread, &first, &count);
 		if (count > 0) C3D_DrawArrays(GPU_TRIANGLES, first, count);
 	}
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_mv, &mv);
 	if (shadow_verts > 0) {   /* blended, no depth write, drawn before the sprites */
 		C3D_TexBind(0, &tex_blob);
 		use_buffer(shadows);

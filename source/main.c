@@ -129,6 +129,41 @@ static float approach(float cur, float target) {
 
 static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 
+/* ---- building the 3D map in the background ----------------------------------
+ * The builder works on a snapshot of Gold's memory, on a lower-priority thread,
+ * into the mesh that isn't being drawn; the main loop keeps running and swaps
+ * meshes when it's done. Until then the old map is drawn, shifted if the player
+ * walked across a connection, or hidden after a warp. */
+static uint8_t snap[0x8000];
+static uint8_t snap_peek(void *ctx, uint16_t a) { (void)ctx; return a >= 0x8000 ? snap[a - 0x8000] : 0xFF; }
+
+typedef struct {
+	GoldView g;
+	WorldMesh *m;
+	Light light;
+	volatile bool done;
+} BuildJob;
+
+static void build_thread(void *arg) {
+	BuildJob *j = arg;
+	world_build(&j->g, j->m, &j->light);
+	j->done = true;
+}
+
+typedef struct { uint8_t group, number; int16_t x, y; } MapSpot;
+
+/* the map the mesh shows, with the player's square on it */
+static MapSpot spot_now(const GoldView *g) {
+	/* coordinates are signed: Gold walks the player to square -1 before switching maps */
+	MapSpot p = { gv8(g, wMapGroup), gv8(g, wMapNumber), (int8_t)gv8(g, wXCoord), (int8_t)gv8(g, wYCoord) };
+	return p;
+}
+
+static bool is_connection(const uint8_t conn[4][2], const MapSpot *to) {
+	for (int i = 0; i < 4; i++) if (conn[i][0] == to->group && conn[i][1] == to->number) return true;
+	return false;
+}
+
 /* settings.txt: one "name=value" per line */
 static bool load_single_screen(void) {
 	FILE *f = fopen(SETTINGS_PATH, "r");
@@ -186,6 +221,14 @@ int main(void) {
 
 	GoldView g = { rom, rom_size, core_peek, NULL };
 	WorldMesh *mesh = render_mesh();
+	BuildJob job = { 0 };
+	Thread job_thread = NULL;
+	bool job_running = false;
+	uint32_t job_key = 0;
+	MapSpot shown = { 0 }, pending = { 0 };
+	uint8_t conn[4][2] = { { 0 } }, next_conn[4][2] = { { 0 } };
+	s32 main_prio = 0x30;
+	svcGetThreadPriority(&main_prio, CUR_THREAD_HANDLE);
 	static uint32_t atlas[BG_ATLAS_W * BG_ATLAS_H];   /* also used for the 128x128 sprite atlas */
 
 	float pl_x = 0, pl_z = 0;     /* where the player is drawn (smoothed), world pixels */
@@ -228,10 +271,39 @@ int main(void) {
 		bool overworld = gv8(&g, wMapStatus) == MAPSTATUS_HANDLE && !in_battle && gv8(&g, wMapGroup) != 0;
 		if (overworld) {
 			light_compute(gv8(&g, hHours), gv8(&g, hMinutes), light_env(gv8(&g, wEnvironment)), &light);
-			if (world_key(&g) != mesh->key || light.key != mesh->light_key) {
-				world_build(&g, mesh, &light);   /* shadows are baked into the mesh */
-				render_mesh_uploaded();
+			uint32_t key = world_key(&g);
+			if (!job_running && (key != mesh->key || light.key != mesh->light_key) && key != job_key) {
+				MapSpot to = spot_now(&g);
+				if (to.group != shown.group || to.number != shown.number) {
+					if (is_connection(conn, &to)) {
+						/* walked across: the square the player left on the old map (just past its
+						 * edge) is the one they're on now, so move the old map's vertices by that */
+						render_mesh_shift((to.x - shown.x) * 16.0f, (to.y - shown.y) * 16.0f);
+					} else render_mesh_hide(true);
+				}
+				for (uint16_t a = 0x8000; a != 0; a++) snap[a - 0x8000] = core_peek(NULL, a);
+				job.g = (GoldView){ rom, rom_size, snap_peek, NULL };
+				job.m = render_mesh_back(); job.light = light; job.done = false;
+				job_key = key;
+				pending = to;
+				for (int i = 0; i < 4; i++) {
+					next_conn[i][0] = gv8(&g, 0xD092 + i * 12); next_conn[i][1] = gv8(&g, 0xD093 + i * 12);
+				}
+				if (render_can_build_behind()) {
+					job_thread = threadCreate(build_thread, &job, 64 * 1024, main_prio + 1, -1, false);
+					job_running = job_thread != NULL;
+				}
+				if (!job_running) { build_thread(&job); }   /* no thread or no second buffer: build now */
 			}
+			if (job_running && job.done) { threadJoin(job_thread, U64_MAX); threadFree(job_thread); job_running = false; }
+			if (!job_running && job_key != 0 && job.done) {
+				render_mesh_swap();
+				mesh = render_mesh();
+				shown = pending;
+				memcpy(conn, next_conn, sizeof conn);
+				job_key = 0;
+			}
+			if (!job_running && mesh->key == key) shown = spot_now(&g);   /* track steps on the current map */
 			if ((frame & 3) == 0) {   /* tile animations, time of day, tileset swaps */
 				uint32_t k = 2166136261u;
 				for (uint16_t a = 0x8000; a < 0x9800; a += 7) k = (k ^ core_peek(NULL, a)) * 16777619u;
@@ -244,8 +316,8 @@ int main(void) {
 				}
 			}
 			float ox = pl_x, oz = pl_z;
-			pl_x = approach(pl_x, gv8(&g, wXCoord) * 16.0f);
-			pl_z = approach(pl_z, gv8(&g, wYCoord) * 16.0f);
+			pl_x = approach(pl_x, (int8_t)gv8(&g, wXCoord) * 16.0f);
+			pl_z = approach(pl_z, (int8_t)gv8(&g, wYCoord) * 16.0f);
 			float moved = fabsf(pl_x - ox) + fabsf(pl_z - oz);
 			if (moved > 0 && moved < 8) { walked += moved; idle = 0; } else idle++;
 		}

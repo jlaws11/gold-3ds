@@ -105,7 +105,11 @@ bottom screen keeps Gold's own battle screen for moves, HP and text.
   tall grass as clumps of upright blades cut from the grass tile,
   and houses whose wall art becomes the front
   facade under a gable roof made from the roof tiles. Colours are Gold's own
-  Game Boy Color palettes for the current time of day.
+  Game Boy Color palettes for the current time of day, picked per environment
+  the way Gold does, with each town's own roof colours. Caves get tall rock
+  walls; rooms stand their back wall up and float in darkness like the
+  original. The mesh is built on a background thread from a snapshot of
+  Gold's memory, so walking between maps doesn't pause the game.
 - `source/light.c` turns the game clock into sun direction, shadow strength,
   sky and tint; shadows are baked into the mesh by tracing toward the sun.
 - `source/render.c` draws it with citro3d, culled to the squares around the

@@ -8,6 +8,8 @@ enum { PAL_GRAY, PAL_RED, PAL_GREEN, PAL_WATER, PAL_YELLOW, PAL_BROWN, PAL_ROOF,
 #define H_BUILDING  (-1000)    /* marks squares owned by a building */
 #define SOLID_H     8
 #define LEDGE_H     4
+#define CAVE_WALL_H 28           /* rock walls in caves and dungeons */
+#define ROOM_WALL_MAX 3          /* indoor back wall: up to 3 squares of the top rows stood up */
 #define WATER_H     (-3)
 #define MAX_BLD     64
 
@@ -15,6 +17,7 @@ typedef struct {
 	const GoldView *g;
 	int w, h, stride;
 	uint32_t meta, coll, palmap;
+	int env;               /* ENV_OUTDOOR / ENV_INDOOR / ENV_CAVE */
 	const uint8_t *perm;
 } Ctx;
 
@@ -66,6 +69,7 @@ static bool ctx_init(Ctx *c, const GoldView *g) {
 	if (c->meta + 256 * 16 > g->rom_size || c->coll + 256 * 4 > g->rom_size) return false;
 	c->perm = g->rom + rom_offset(ROM_COLLISION_PERMS_BANK, ROM_COLLISION_PERMS_ADDR);
 	c->palmap = current_palmap(g);
+	c->env = light_env(gv8(g, wEnvironment));
 	return true;
 }
 
@@ -105,6 +109,10 @@ static short bld_id[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W];
 static Bld blds[MAX_BLD];
 static short fill_stack[WORLD_MAX_SQ_W * WORLD_MAX_SQ_H][2];
 static int GW, GH, GO;                 /* grid size and origin of the current build */
+/* the ground of the last finished build, for battle staging (the builder's own
+ * arrays may be mid-rebuild on another thread) */
+static uint8_t open_map[WORLD_MAX_SQ_H][WORLD_MAX_SQ_W];
+static int open_w, open_h, open_o;
 static const Light *LT;
 static float sun_h[2], sun_slope;      /* horizontal sun direction and rise per pixel */
 
@@ -120,7 +128,7 @@ static BShape bshape(const Bld *b) {
 
 /* Tree crown: an 8-sided rounded canopy on a short trunk, one per square.
  * Rings of (height, radius) from bottom to top, then a point at the apex. */
-#define TREE_SEG 8
+#define TREE_SEG 7
 static const float crown_y[4] = { 5.5f, 10.5f, 16.5f, 21.0f };
 static const float crown_r[4] = { 4.6f, 8.2f, 7.2f, 4.2f };
 #define CROWN_APEX 23.0f
@@ -226,10 +234,15 @@ static void top_face(WorldMesh *m, float X, float Z, float y, const uint8_t t[4]
  * textured with the tree's own tiles and lit/shadowed per vertex. */
 static void emit_tree(WorldMesh *m, float X, float Z, const uint8_t t[4], int gx, int gy) {
 	const float cx = X + 8, cz = Z + 8, k = tree_scale(gx, gy);
-	/* inside a forest the trunk and lower crown are hidden by the neighbours */
+	/* inside a forest the trunk and lower crown are hidden by the neighbours;
+	 * deep inside, only the top of the crown can be seen at all */
 	bool inner = gx > 0 && gy > 0 && gx < GW - 1 && gy < GH - 1 &&
 	             cls[gy][gx - 1] == CL_TREE && cls[gy][gx + 1] == CL_TREE &&
 	             cls[gy - 1][gx] == CL_TREE && cls[gy + 1][gx] == CL_TREE;
+	bool deep = inner && gx > 1 && gy > 1 && gx < GW - 2 && gy < GH - 2 &&
+	            cls[gy - 1][gx - 1] == CL_TREE && cls[gy - 1][gx + 1] == CL_TREE &&
+	            cls[gy + 1][gx - 1] == CL_TREE && cls[gy + 1][gx + 1] == CL_TREE &&
+	            cls[gy + 2][gx] == CL_TREE;
 	P3 ring[4][TREE_SEG + 1];
 	for (int i = 0; i < 4; i++) for (int s = 0; s <= TREE_SEG; s++) {
 		float a = (s + 0.5f) * 6.2831853f / TREE_SEG;
@@ -243,7 +256,7 @@ static void emit_tree(WorldMesh *m, float X, float Z, const uint8_t t[4], int gx
 	quad(m, p3(cx - 2, crown_y[0] * k, cz - 2), p3(cx - 2, crown_y[0] * k, cz + 2), p3(cx - 2, 0, cz + 2), p3(cx - 2, 0, cz - 2), t[2], lambert(-1, 0, 0) * 0.55f);
 	}
 	/* crown bands */
-	for (int i = inner ? 1 : 0; i < 3; i++) {
+	for (int i = deep ? 2 : inner ? 1 : 0; i < 3; i++) {
 		float dy = (crown_y[i + 1] - crown_y[i]) * k, dr = crown_r[i] - crown_r[i + 1];
 		for (int s = 0; s < TREE_SEG; s++) {
 			float am = (s + 1) * 6.2831853f / TREE_SEG;
@@ -309,7 +322,7 @@ bool world_build(const GoldView *g, WorldMesh *m, const Light *light) {
 		switch (cls[y][x]) {
 		case CL_WATER: hgt[y][x] = WATER_H; break;
 		case CL_TREE:  hgt[y][x] = 0; break;    /* ground under the crown; crown via height_at */
-		case CL_SOLID: case CL_ROOF: hgt[y][x] = SOLID_H; break;
+		case CL_SOLID: case CL_ROOF: hgt[y][x] = c.env == ENV_CAVE ? CAVE_WALL_H : SOLID_H; break;
 		case CL_LEDGE: hgt[y][x] = LEDGE_H; break;
 		default:       hgt[y][x] = 0; break;
 		}
@@ -355,11 +368,48 @@ bool world_build(const GoldView *g, WorldMesh *m, const Light *light) {
 	}
 	m->buildings = nb;
 
+	/* rooms: the solid rows along the top of the map are the back wall; stand them
+	 * up as a wall with their own art (furniture against it stays painted on), and
+	 * leave the void around the room unlit like the original */
+	static uint8_t wall_col[WORLD_MAX_SQ_W];
+	int wallK = 0;
+	if (c.env == ENV_INDOOR) {
+		int count[ROOM_WALL_MAX + 1] = { 0 };
+		for (int x = O; x < O + c.w * 2; x++) {
+			int k = 0;
+			while (k < ROOM_WALL_MAX && (cls[O + k][x] == CL_SOLID || cls[O + k][x] == CL_ROOF)) k++;
+			wall_col[x] = (uint8_t)k;
+			count[k]++;
+		}
+		for (int k = 1; k <= ROOM_WALL_MAX; k++) if (count[k] > count[wallK] || wallK == 0) wallK = count[k] ? k : wallK;
+		for (int x = 0; x < W; x++) {
+			bool on = x >= O && x < O + c.w * 2 && wall_col[x] >= wallK && wallK > 0;
+			wall_col[x] = on;
+			if (on) for (int k = 0; k < wallK; k++) hgt[O + k][x] = (short)(wallK * 16);
+		}
+	}
+
 	const float s_facade = lambert(0, 0, 1);
 	for (int gy = 0; gy < H; gy++) for (int gx = 0; gx < W; gx++) {
 		m->start[gy * W + gx] = m->count;
 		const float X = (gx - O) * 16.0f, Z = (gy - O) * 16.0f;
 		const uint8_t *t = tiles[gy][gx];
+
+		if (c.env == ENV_INDOOR) {
+			if (gx < O || gy < O || gx >= O + c.w * 2 || gy >= O + c.h * 2) continue;   /* the void */
+			if (wallK && wall_col[gx] && gy < O + wallK) {
+				if (gy == O + wallK - 1) {      /* the wall stands on the front edge of its last row */
+					float zf = (wallK) * 16.0f, sh = s_facade;
+					for (int i = 0; i < 2; i++)
+						for (int r = 0; r < wallK * 2; r++) {
+							int tile = tiles[O + r / 2][gx][(r % 2) * 2 + i];
+							float yt = wallK * 16.0f - r * 8, yb = yt - 8;
+							quad(m, p3(X + i * 8, yt, zf), p3(X + i * 8 + 8, yt, zf), p3(X + i * 8 + 8, yb, zf), p3(X + i * 8, yb, zf), tile, sh);
+						}
+				}
+				continue;
+			}
+		}
 
 		if (bld_id[gy][gx] >= 0) {
 			const Bld *b = &blds[bld_id[gy][gx]];
@@ -421,13 +471,15 @@ bool world_build(const GoldView *g, WorldMesh *m, const Light *light) {
 		}
 	}
 	m->start[W * H] = m->count;
+	for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) open_map[y][x] = cls[y][x] == CL_GROUND || cls[y][x] == CL_GRASS;
+	open_w = W; open_h = H; open_o = O;
 	return m->count < m->cap;
 }
 
 bool world_open(float x, float z) {
-	int gx = (int)floorf(x / 16) + GO, gy = (int)floorf(z / 16) + GO;
-	if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) return false;
-	return cls[gy][gx] == CL_GROUND || cls[gy][gx] == CL_GRASS;
+	int gx = (int)floorf(x / 16) + open_o, gy = (int)floorf(z / 16) + open_o;
+	if (gx < 0 || gy < 0 || gx >= open_w || gy >= open_h) return false;
+	return open_map[gy][gx];
 }
 
 void world_row_range(const WorldMesh *m, int y, int x0, int x1, int *first, int *count) {
@@ -457,13 +509,26 @@ static uint32_t lighten(uint32_t c, uint32_t toward, float t) {
 
 void world_bg_atlas(const GoldView *g, uint32_t *rgba) {
 	uint32_t palmap = current_palmap(g);
-	int tod = gv8(g, wTimeOfDayPal) & 3;
-	uint32_t po = rom_offset(ROM_BG_PALETTES_BANK, ROM_BG_PALETTES_ADDR) + tod * 64;
+	int tod = gv8(g, wTimeOfDayPal) & 3, env = gv8(g, wEnvironment) & 7;
+	/* like Gold's LoadMapPals: the environment picks 8 of the BG palettes for the time
+	 * of day; towns and routes then get their map group's roof colours */
+	uint32_t envtab = rom_offset(ROM_BG_PALETTES_BANK, ROM_ENV_COLORS_ADDR);
+	uint32_t colors = rom_offset(ROM_BG_PALETTES_BANK, g->rom[envtab + env * 2] | (g->rom[envtab + env * 2 + 1] << 8)) + tod * 8;
+	uint32_t base_pal = rom_offset(ROM_BG_PALETTES_BANK, ROM_BG_PALETTES_ADDR);
 	uint32_t pal[8][4];
 	for (int p = 0; p < 8; p++) for (int i = 0; i < 4; i++) {
-		uint16_t v = g->rom[po + p * 8 + i * 2] | (g->rom[po + p * 8 + i * 2 + 1] << 8);
+		uint32_t po = base_pal + (colors + 8 <= g->rom_size ? g->rom[colors + p] : p) * 8;
+		uint16_t v = g->rom[po + i * 2] | (g->rom[po + i * 2 + 1] << 8);
 		int r = v & 31, gg = (v >> 5) & 31, b = (v >> 10) & 31;
 		pal[p][i] = RGBA(r * 255 / 31, gg * 255 / 31, b * 255 / 31, 255);
+	}
+	if (env == 1 || env == 2) {   /* TOWN, ROUTE */
+		uint32_t ro = rom_offset(ROM_BG_PALETTES_BANK, ROM_ROOF_PALS_ADDR) + gv8(g, wMapGroup) * 8 + (tod >= 2 ? 4 : 0);
+		for (int i = 0; i < 2; i++) {
+			uint16_t v = g->rom[ro + i * 2] | (g->rom[ro + i * 2 + 1] << 8);
+			int r = v & 31, gg = (v >> 5) & 31, b = (v >> 10) & 31;
+			pal[PAL_ROOF][1 + i] = RGBA(r * 255 / 31, gg * 255 / 31, b * 255 / 31, 255);
+		}
 	}
 	for (int t = 0; t < 256; t++) {
 		uint16_t base = t < 0x80 ? 0x9000 + t * 16 : 0x8800 + (t - 0x80) * 16;

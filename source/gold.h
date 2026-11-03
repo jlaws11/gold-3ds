@@ -50,6 +50,8 @@
 #define ROM_COLLISION_PERMS_ADDR 0x74BE
 #define ROM_BG_PALETTES_BANK     0x02
 #define ROM_BG_PALETTES_ADDR     0x775E   /* 4 times of day x 8 palettes x 4 colours, RGB555 */
+#define ROM_ENV_COLORS_ADDR      0x76CE   /* bank 02: per environment, 4 times of day x 8 palette indices */
+#define ROM_ROOF_PALS_ADDR       0x79AE   /* bank 02: per map group, roof colours 1-2 for day, then night */
 
 #define MAPSTATUS_HANDLE 2
 

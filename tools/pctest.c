@@ -54,6 +54,8 @@ int main(int argc, char **argv) {
 	        hour, minute, ok, m.count, m.buildings, ns, nsh, L.sun[0], L.sun[1], L.sun[2], L.shadow);
 	/* optional fake battle */
 	float cam[5] = { cx + 8, cz + 8, 0, 0.72f, 215 };
+	if (getenv("CAMDIST")) cam[4] = atof(getenv("CAMDIST"));     /* overview shots of whole maps */
+	if (getenv("CAMPITCH")) cam[3] = atof(getenv("CAMPITCH"));
 	static WVert bq[12], bs[12];
 	static uint32_t btex[BATTLE_TEX_W * BATTLE_TEX_H];
 	int nbq = 0, nbs = 0;

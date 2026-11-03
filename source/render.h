@@ -14,6 +14,11 @@ void render_init(void);
 void render_exit(void);
 
 WorldMesh *render_mesh(void);          /* the mesh buffer (vertices live in GPU-visible memory) */
+WorldMesh *render_mesh_back(void);     /* where the next mesh is built (the same one if memory is short) */
+bool render_can_build_behind(void);
+void render_mesh_swap(void);           /* show the mesh just built in render_mesh_back() */
+void render_mesh_shift(float dx, float dz);   /* draw the current mesh moved (old map after a connection) */
+void render_mesh_hide(bool hide);      /* hide the world until the next swap (after a warp) */
 void render_mesh_uploaded(void);       /* call after world_build() wrote into render_mesh() */
 void render_bg_atlas(const uint32_t *rgba);
 void render_obj_atlas(const uint32_t *rgba);
