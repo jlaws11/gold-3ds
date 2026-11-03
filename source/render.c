@@ -19,7 +19,9 @@ static C3D_RenderTarget *top_l, *top_r, *bottom;
 static DVLB_s *dvlb;
 static shaderProgram_s prog;
 static int u_proj, u_mv, u_amb, u_glow;
-static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob, tex_tall, tex_battle, tex_dim;
+static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob, tex_tall, tex_battle, tex_dim, tex_ui;
+static bool ui_ready;
+static WVert *ui_quads;   /* double-buffered like the overlay */
 static WorldMesh mesh;
 static WVert *spr, *shadows, *player, *battle_q, *screen_quads, *ov_quads;
 static int ov_flip;
@@ -93,6 +95,7 @@ void render_init(void) {
 	tex_new(&tex_tall, TALL_TEX_W, TALL_TEX_H);
 	tex_new(&tex_battle, BATTLE_TEX_W, BATTLE_TEX_H);
 	tex_new(&tex_dim, 8, 8);
+	ui_quads = linearAlloc(sizeof(WVert) * 6 * FRUI_MAX_QUADS * 2);
 	{   /* translucent black, to darken the 3D behind a full-screen menu */
 		static uint32_t dim[64];
 		for (int i = 0; i < 64; i++) dim[i] = RGBA(0, 0, 0, 150);
@@ -126,7 +129,8 @@ void render_init(void) {
 }
 
 void render_exit(void) {
-	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob); C3D_TexDelete(&tex_tall); C3D_TexDelete(&tex_battle); C3D_TexDelete(&tex_dim); linearFree(ov_quads); linearFree(player); linearFree(battle_q);
+	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob); C3D_TexDelete(&tex_tall); C3D_TexDelete(&tex_battle); C3D_TexDelete(&tex_dim); linearFree(ov_quads); linearFree(ui_quads);
+	if (ui_ready) C3D_TexDelete(&tex_ui); linearFree(player); linearFree(battle_q);
 	linearFree(mesh.verts); linearFree(spr); linearFree(shadows); linearFree(screen_quads); linearFree(lcd_rgba);
 	shaderProgramFree(&prog);
 	DVLB_Free(dvlb);
@@ -142,6 +146,10 @@ WVert *render_shadow_buf(int *cap) { *cap = SPRITE_CAP; return shadows; }
 WVert *render_player_buf(void) { return player; }
 void render_tall_sheet(const uint32_t *rgba) { upload(&tex_tall, rgba, TALL_TEX_W, TALL_TEX_H, TALL_TEX_W); }
 WVert *render_battle_buf(void) { return battle_q; }
+void render_ui_atlas(const uint32_t *rgba) {
+	if (!ui_ready) { tex_new(&tex_ui, FRUI_TEX, FRUI_TEX); ui_ready = true; }
+	upload(&tex_ui, rgba, FRUI_TEX, FRUI_TEX, FRUI_TEX);
+}
 void render_battle_sheet(const uint32_t *rgba) { upload(&tex_battle, rgba, BATTLE_TEX_W, BATTLE_TEX_H, BATTLE_TEX_W); }
 
 void render_lcd(const uint8_t *lcd) {
@@ -271,13 +279,43 @@ static void draw_overlay(WVert *q, int n, bool dim) {
 	C3D_DrawArrays(GPU_TRIANGLES, first, n - first);
 }
 
-void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, int battle_verts, const Light *L, const Overlay *ov) {
+/* the FireRed-style interface: atlas quads in top-screen pixels */
+static int build_ui(const UiList *ui, WVert *q) {
+	if (!ui || !ui_ready) return 0;
+	const float k = 1.0f / FRUI_TEX;
+	for (int i = 0; i < ui->n; i++) {
+		const UiQuad *u = &ui->q[i];
+		quad_uv(q + i * 6, u->x, u->y, u->x + u->w, u->y + u->h, u->u0 * k, u->v0 * k, u->u1 * k, u->v1 * k);
+	}
+	return ui->n * 6;
+}
+
+static void draw_ui(WVert *q, int n) {
+	if (n == 0) return;
+	C3D_Mtx proj, id;
+	Mtx_OrthoTilt(&proj, 0.0f, 400.0f, 240.0f, 0.0f, 1.0f, -1.0f, true);
+	Mtx_Identity(&id);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_mv, &id);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_amb, 1, 1, 1, 1);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_glow, 0, 0, 0, 0);
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	C3D_AlphaTest(true, GPU_GREATER, 0x80);
+	C3D_TexBind(0, &tex_ui);
+	use_buffer(q);
+	C3D_DrawArrays(GPU_TRIANGLES, 0, n);
+}
+
+void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, int battle_verts, const Light *L, const Overlay *ov, const UiList *ui) {
 	uint32_t sky = L->sky;
 	ov_flip ^= 1;
 	WVert *oq = ov_quads + ov_flip * 30;
 	bool dim;
 	int ovn = voxel ? build_overlay(ov, oq, &dim) : 0;
 	if (ovn) GSPGPU_FlushDataCache(oq, sizeof(WVert) * ovn);
+	WVert *uq = ui_quads + ov_flip * 6 * FRUI_MAX_QUADS;
+	int uin = voxel ? build_ui(ui, uq) : 0;
+	if (uin) GSPGPU_FlushDataCache(uq, sizeof(WVert) * uin);
 	if (sprite_verts > 0) GSPGPU_FlushDataCache(spr, sizeof(WVert) * sprite_verts);
 	if (shadow_verts > 0) GSPGPU_FlushDataCache(shadows, sizeof(WVert) * shadow_verts);
 	if (player_verts > 0) GSPGPU_FlushDataCache(player, sizeof(WVert) * player_verts);
@@ -289,11 +327,13 @@ void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_ve
 		C3D_FrameDrawOn(top_l);
 		draw_world(cam, -iod, sprite_verts, shadow_verts, player_verts, battle_verts, L);
 		draw_overlay(oq, ovn, dim);
+		draw_ui(uq, uin);
 		if (iod > 0.0f) {
 			C3D_RenderTargetClear(top_r, C3D_CLEAR_ALL, sky, 0);
 			C3D_FrameDrawOn(top_r);
 			draw_world(cam, iod, sprite_verts, shadow_verts, player_verts, battle_verts, L);
 			draw_overlay(oq, ovn, dim);
+			draw_ui(uq, uin);
 		}
 	} else {
 		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, 0x101218FF, 0);

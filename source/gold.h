@@ -31,9 +31,15 @@
 #define wBattleMonSpecies        0xCB0C   /* cleared at battle start, set when our Pokemon is sent out */
 #define wBattleMonDVs            0xCB12
 #define wBattleMonHP             0xCB1C   /* big-endian */
+#define wBattleMonMaxHP          0xCB1E
 #define wEnemyMonSpecies         0xD0EF
 #define wEnemyMonDVs             0xD0F5
 #define wEnemyMonHP              0xD0FF   /* big-endian */
+#define wEnemyMonMaxHP           0xD101
+
+#ifndef wTilemap
+#define wTilemap                 0xC3A0   /* the 20x18 screen of tiles Gold draws */
+#endif
 
 /* HRAM: the game's clock (already includes the player's time offset) */
 #define hHours                   0xFF96

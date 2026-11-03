@@ -19,7 +19,8 @@ battles stay readable.
    v1.1) to `/3ds/gold3ds/firered.gba`. This turns on:
    - **a taller player**: Red's walking sprite, read from that ROM, replaces the
      player in 3D (biking and surfing keep the Gold sprite);
-   - **3D battles**: see below.
+   - **3D battles**: see below;
+   - **FireRed's menus** in single-screen mode: see below.
    Without it, the player uses the Gold sprite and battles show the original
    picture on both screens.
 
@@ -56,6 +57,17 @@ Everything then happens on the top screen:
 The layout is chosen each frame from Gold's own screen buffer, so it follows
 the game without any changes to it. The bottom screen keeps showing the Game
 Boy picture either way.
+
+### FireRed's look
+
+With FireRed/LeafGreen on the SD card, single-screen mode redraws Gold's
+windows in FireRed's style, at the top screen's full resolution: FireRed's
+font, its dialogue box with the "more text" arrow, its menu frame for the START
+menu, YES/NO and other boxes, and in battle its message panel, FIGHT/PKMN/PACK/RUN
+panel, HP boxes with HP and EXP bars, and a move list with PP and type. The
+text, cursor and numbers come from Gold each frame, so Gold's menus work as
+always. Screens it can't restyle yet (party, bag, Pokédex, PC, naming) show
+Gold's own picture.
 
 ## Day and night
 
@@ -100,6 +112,9 @@ bottom screen keeps Gold's own battle screen for moves, HP and text.
   player, plus the player and NPC sprites as upright cut-outs.
 - `source/overlay.c` picks the single-screen layout from Gold's screen buffer
   (`wTilemap`): text box frames, menus and the battle HP boxes.
+- `source/frui.c` builds the FireRed-style interface: it decodes FireRed's font,
+  frames, battle panels and HP boxes into one texture at startup, then lays out
+  Gold's windows and battle screens with them every frame.
 - `source/battle.c` stages battles in the world from Gold's battle memory;
   `source/frpics.c` decompresses FireRed's pictures (LZ77, 4bpp) at runtime.
 - Memory addresses come from [pret/pokegold](https://github.com/pret/pokegold)'s symbol file.

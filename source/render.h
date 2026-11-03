@@ -2,6 +2,7 @@
 #include "world.h"
 #include "battle.h"
 #include "overlay.h"
+#include "frui.h"
 
 typedef struct {
 	float tx, tz;        /* world point the camera looks at */
@@ -23,8 +24,10 @@ WVert *render_player_buf(void);              /* 6 vertices for the tall player *
 void render_tall_sheet(const uint32_t *rgba); /* TALL_TEX_W x TALL_TEX_H */
 WVert *render_battle_buf(void);               /* 12 vertices: the two Pokémon */
 void render_battle_sheet(const uint32_t *rgba); /* BATTLE_TEX_W x BATTLE_TEX_H */
+void render_ui_atlas(const uint32_t *rgba);     /* FRUI_TEX x FRUI_TEX: the FireRed-style interface */
 
 /* One frame. voxel=false shows the Game Boy picture on the top screen instead.
- * ov (single-screen mode, may be NULL): parts of the Game Boy picture drawn over the 3D. */
+ * ov (single-screen mode, may be NULL): parts of the Game Boy picture drawn over the 3D.
+ * ui (may be NULL): the FireRed-style interface, drawn on top. */
 void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, int battle_verts,
-                  const Light *light, const Overlay *ov);
+                  const Light *light, const Overlay *ov, const UiList *ui);

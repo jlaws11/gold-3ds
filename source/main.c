@@ -12,8 +12,9 @@
  * The camera is fixed: it follows the player from the south, like the original.
  * Lighting follows the game's clock: moving sun and shadows, sunset, lit windows at night.
  * Optional: put your own FireRed/LeafGreen ROM at /3ds/gold3ds/firered.gba for a
- * taller player sprite (Red) and 3D battles: the camera swings down and both
- * Pokémon appear in the world, using FireRed's pictures read from that ROM.
+ * taller player sprite (Red), 3D battles (both Pokémon appear in the world, using
+ * FireRed's pictures) and, in single-screen mode, FireRed's menus, text boxes and
+ * HP boxes, all read from that ROM.
  */
 #include <3ds.h>
 #include <stdio.h>
@@ -30,6 +31,7 @@
 #include "frpics.h"
 #include "battle.h"
 #include "overlay.h"
+#include "frui.h"
 
 #define APP_DIR  "sdmc:/3ds/gold3ds"
 #define ROM_PATH APP_DIR "/gold.gbc"
@@ -173,6 +175,15 @@ int main(void) {
 		if (!frt && !tall) { fclose(gba); gba = NULL; }
 	}
 
+	/* FireRed-style interface for single-screen mode, from the same ROM */
+	bool fr_ui = false;
+	if (frt) {
+		uint32_t *ui_atlas = malloc(FRUI_TEX * FRUI_TEX * 4);
+		if (ui_atlas && frui_load(gba_read, NULL, frt, ui_atlas)) { render_ui_atlas(ui_atlas); fr_ui = true; }
+		free(ui_atlas);
+	}
+	static UiList ui;
+
 	GoldView g = { rom, rom_size, core_peek, NULL };
 	WorldMesh *mesh = render_mesh();
 	static uint32_t atlas[BG_ATLAS_W * BG_ATLAS_H];   /* also used for the 128x128 sprite atlas */
@@ -276,8 +287,17 @@ int main(void) {
 
 		render_lcd(core_lcd());
 		bool show3d = voxel && (overworld || battle.active) && mesh->count > 0;
-		if (single) overlay_plan(&g, overworld, battle.active, &overlay);
-		render_frame(show3d, &cam, nspr, nshadow, nplayer, nbattle, &light, single ? &overlay : NULL);
+		const UiList *uip = NULL;
+		if (single) {
+			overlay_plan(&g, overworld, battle.active, &overlay);
+			if (fr_ui) {
+				/* FireRed's look where it can restyle the screen; Gold's picture where it can't */
+				FruiResult r = frui_plan(&g, overworld, battle.active, &ui);
+				if (r == FRUI_DRAWN) { overlay.n = 0; overlay.dim = false; uip = &ui; }
+				else if (r == FRUI_NONE) { overlay.n = 0; overlay.dim = false; }
+			}
+		}
+		render_frame(show3d, &cam, nspr, nshadow, nplayer, nbattle, &light, single ? &overlay : NULL, uip);
 
 		/* save once the game's save data has changed and then stayed still for 2 seconds */
 		if (++frame % 120 == 0) {

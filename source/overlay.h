@@ -10,7 +10,6 @@
 #pragma once
 #include "gold.h"
 
-#define wTilemap 0xC3A0
 
 typedef struct { float sx, sy, sw, sh;  /* source rectangle in Game Boy pixels */
                  float dx, dy, dw, dh;  /* destination on the 400x240 top screen */ } OverlayRect;
