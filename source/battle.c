@@ -3,6 +3,7 @@
 #include <string.h>
 
 #define PIC_SCALE 0.8f        /* FireRed pictures are 64 px; 0.8 keeps them a little over Red's height */
+/* Red's back picture is drawn at 0.7 of that, about his overworld height */
 #define SINK_MAX  (64 * PIC_SCALE)
 
 static void stage(Battle *b);
@@ -141,7 +142,7 @@ int battle_quads(const Battle *b, float yaw, WVert *out, int cap) {
 	if (b->enemy && n + 6 <= cap)
 		n += billboard(out + n, ex, ez, yaw, 0.0f, 0.5f, b->enemy_bottom, b->enemy_in, b->enemy_sink, b->enemy_shake);
 	if ((b->ally || b->ally_is_red) && n + 6 <= cap)
-		n += billboard(out + n, ax, az, yaw, 0.5f, 1.0f, b->ally_bottom, b->ally_is_red ? 1 : b->ally_in, b->ally_sink, b->ally_shake);
+		n += billboard(out + n, ax, az, yaw, 0.5f, 1.0f, b->ally_bottom, b->ally_is_red ? 0.7f : b->ally_in, b->ally_sink, b->ally_shake);
 	return n;
 }
 
