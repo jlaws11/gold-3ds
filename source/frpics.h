@@ -17,6 +17,7 @@ typedef struct {
 	uint32_t font, font_widths, font_small, font_small_widths;
 	uint32_t msg_window, window_pals, user_frame, user_frame_pal;
 	uint32_t down_arrow;   /* sDownArrowTiles: the "more text" arrow */
+	uint32_t icons, icon_pal_idx, icon_pal_table;   /* gMonIconTable, gMonIconPaletteIndices, gMonIconPaletteTable */
 } FrTables;
 
 /* Battle interface graphics: the same file offsets in all four versions */
@@ -42,6 +43,9 @@ const FrTables *fr_tables(const uint8_t *header, size_t n);
 bool fr_mon_pic(FrRead rd, void *ctx, const FrTables *t, int species, bool back, bool shiny,
                 uint32_t *rgba, int *bottom);
 bool fr_red_back(FrRead rd, void *ctx, const FrTables *t, uint32_t *rgba, int *bottom);
+
+/* A party-menu icon, 32x32 RGBA (frame 0 or 1 of its little animation). */
+bool fr_mon_icon(FrRead rd, void *ctx, const FrTables *t, int species, int frame, uint32_t *rgba);
 
 /* GBA BIOS LZ77 (type 0x10). Returns decompressed size, 0 on error. */
 size_t fr_lz77(const uint8_t *src, size_t src_n, uint8_t *dst, size_t dst_cap);

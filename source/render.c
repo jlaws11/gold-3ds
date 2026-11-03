@@ -20,6 +20,8 @@ static DVLB_s *dvlb;
 static shaderProgram_s prog;
 static int u_proj, u_mv, u_amb, u_glow;
 static C3D_Tex tex_bg, tex_obj, tex_lcd, tex_blob, tex_tall, tex_battle, tex_dim, tex_ui;
+static C3D_Tex tex_lcd_cut, tex_pic, tex_icons;   /* full screens: Gold's art with its lightest shade see-through, a Pokémon picture, party icons */
+static WVert *screen_dim;
 static bool ui_ready;
 static WVert *ui_quads;   /* double-buffered like the overlay */
 static WorldMesh meshes[2];   /* drawn one and the one being built (when memory allows) */
@@ -29,7 +31,7 @@ static float mesh_dx, mesh_dz;  /* shift for drawing the old map while the new o
 #define mesh (meshes[cur_mesh])
 static WVert *spr, *shadows, *player, *battle_q, *screen_quads, *ov_quads;
 static int ov_flip;
-static uint32_t *lcd_rgba;
+static uint32_t *lcd_rgba, *lcd_cut;
 
 /* PICA200 textures are stored in 8x8 tiles with Morton (Z-order) texels. */
 static inline uint32_t tiled_index(int x, int y, int w) {
@@ -59,6 +61,8 @@ static void set_quad(WVert *q, float x0, float y0, float x1, float y1, float u1,
 	};
 	memcpy(q, v, sizeof v);
 }
+
+static void quad_uv(WVert *q, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1);
 
 void render_init(void) {
 	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
@@ -95,6 +99,9 @@ void render_init(void) {
 	tex_new(&tex_bg, BG_ATLAS_W, BG_ATLAS_H);
 	tex_new(&tex_obj, 128, 128);
 	tex_new(&tex_lcd, 256, 256);
+	tex_new(&tex_lcd_cut, 256, 256);
+	tex_new(&tex_pic, 64, 64);
+	tex_new(&tex_icons, 256, 32);
 	tex_new(&tex_blob, 16, 16);
 	tex_new(&tex_tall, TALL_TEX_W, TALL_TEX_H);
 	tex_new(&tex_battle, BATTLE_TEX_W, BATTLE_TEX_H);
@@ -130,6 +137,10 @@ void render_init(void) {
 	screen_quads = linearAlloc(sizeof(WVert) * 12);
 	ov_quads = linearAlloc(sizeof(WVert) * 2 * 30);   /* double-buffered: written while the GPU may read the other half */
 	lcd_rgba = linearAlloc(160 * 144 * 4);
+	lcd_cut = linearAlloc(160 * 144 * 4);
+	screen_dim = linearAlloc(sizeof(WVert) * 6);
+	quad_uv(screen_dim, 0, 0, 400, 240, 0, 0, 1, 1);
+	GSPGPU_FlushDataCache(screen_dim, sizeof(WVert) * 6);
 	/* Game Boy picture at 1.5x: 240x216, centred on each screen */
 	set_quad(screen_quads,     80, 12, 320, 228, 160 / 256.0f, 144 / 256.0f);
 	set_quad(screen_quads + 6, 40, 12, 280, 228, 160 / 256.0f, 144 / 256.0f);
@@ -138,6 +149,7 @@ void render_init(void) {
 
 void render_exit(void) {
 	C3D_TexDelete(&tex_bg); C3D_TexDelete(&tex_obj); C3D_TexDelete(&tex_lcd); C3D_TexDelete(&tex_blob); C3D_TexDelete(&tex_tall); C3D_TexDelete(&tex_battle); C3D_TexDelete(&tex_dim); linearFree(ov_quads); linearFree(ui_quads);
+	C3D_TexDelete(&tex_lcd_cut); C3D_TexDelete(&tex_pic); C3D_TexDelete(&tex_icons); linearFree(lcd_cut); linearFree(screen_dim);
 	if (ui_ready) C3D_TexDelete(&tex_ui);
 	linearFree(player); linearFree(battle_q);
 	linearFree(meshes[0].verts); if (meshes[1].verts) linearFree(meshes[1].verts); linearFree(spr); linearFree(shadows); linearFree(screen_quads); linearFree(lcd_rgba);
@@ -165,6 +177,8 @@ WVert *render_shadow_buf(int *cap) { *cap = SPRITE_CAP; return shadows; }
 WVert *render_player_buf(void) { return player; }
 void render_tall_sheet(const uint32_t *rgba) { upload(&tex_tall, rgba, TALL_TEX_W, TALL_TEX_H, TALL_TEX_W); }
 WVert *render_battle_buf(void) { return battle_q; }
+void render_ui_pic(const uint32_t *rgba) { upload(&tex_pic, rgba, 64, 64, 64); }
+void render_ui_icons(const uint32_t *rgba) { upload(&tex_icons, rgba, 256, 32, 256); }
 void render_ui_atlas(const uint32_t *rgba) {
 	if (!ui_ready) { tex_new(&tex_ui, FRUI_TEX, FRUI_TEX); ui_ready = true; }
 	upload(&tex_ui, rgba, FRUI_TEX, FRUI_TEX, FRUI_TEX);
@@ -175,8 +189,9 @@ void render_lcd(const uint8_t *lcd) {
 	/* soft cream-to-ink ramp until the colour core lands */
 	static const uint32_t shade[4] = {
 		RGBA(240, 238, 214, 255), RGBA(168, 186, 140, 255), RGBA(84, 104, 92, 255), RGBA(28, 30, 40, 255) };
-	for (int i = 0; i < 160 * 144; i++) lcd_rgba[i] = shade[lcd[i] & 3];
+	for (int i = 0; i < 160 * 144; i++) { lcd_rgba[i] = shade[lcd[i] & 3]; lcd_cut[i] = (lcd[i] & 3) ? lcd_rgba[i] : 0; }
 	upload(&tex_lcd, lcd_rgba, 160, 144, 160);
+	upload(&tex_lcd_cut, lcd_cut, 160, 144, 160);
 }
 
 static void use_buffer(WVert *base) {
@@ -304,15 +319,35 @@ static void draw_overlay(WVert *q, int n, bool dim) {
 	C3D_DrawArrays(GPU_TRIANGLES, first, n - first);
 }
 
-/* the FireRed-style interface: atlas quads in top-screen pixels */
+/* the FireRed-style interface: quads over several textures, in top-screen pixels */
+static uint8_t ui_tex[FRUI_MAX_QUADS];
+static bool ui_dim;
+
 static int build_ui(const UiList *ui, WVert *q) {
 	if (!ui || !ui_ready) return 0;
-	const float k = 1.0f / FRUI_TEX;
+	ui_dim = ui->dim;
 	for (int i = 0; i < ui->n; i++) {
 		const UiQuad *u = &ui->q[i];
-		quad_uv(q + i * 6, u->x, u->y, u->x + u->w, u->y + u->h, u->u0 * k, u->v0 * k, u->u1 * k, u->v1 * k);
+		float kw, kh;
+		switch (u->tex) {
+		case UI_TEX_LCD:   kw = kh = 1.0f / 256; break;
+		case UI_TEX_PIC:   kw = kh = 1.0f / 64; break;
+		case UI_TEX_ICONS: kw = 1.0f / 256; kh = 1.0f / 32; break;
+		default:           kw = kh = 1.0f / FRUI_TEX; break;
+		}
+		ui_tex[i] = u->tex;
+		quad_uv(q + i * 6, u->x, u->y, u->x + u->w, u->y + u->h, u->u0 * kw, u->v0 * kh, u->u1 * kw, u->v1 * kh);
 	}
 	return ui->n * 6;
+}
+
+static C3D_Tex *ui_texture(int t) {
+	switch (t) {
+	case UI_TEX_LCD:   return &tex_lcd_cut;
+	case UI_TEX_PIC:   return &tex_pic;
+	case UI_TEX_ICONS: return &tex_icons;
+	default:           return &tex_ui;
+	}
 }
 
 static void draw_ui(WVert *q, int n) {
@@ -325,10 +360,22 @@ static void draw_ui(WVert *q, int n) {
 	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_amb, 1, 1, 1, 1);
 	C3D_FVUnifSet(GPU_VERTEX_SHADER, u_glow, 0, 0, 0, 0);
 	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	if (ui_dim) {   /* darken the world behind a full screen */
+		use_buffer(screen_dim);
+		C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		C3D_TexBind(0, &tex_dim);
+		C3D_DrawArrays(GPU_TRIANGLES, 0, 6);
+	}
 	C3D_AlphaTest(true, GPU_GREATER, 0x80);
-	C3D_TexBind(0, &tex_ui);
 	use_buffer(q);
-	C3D_DrawArrays(GPU_TRIANGLES, 0, n);
+	int quads = n / 6, i = 0;
+	while (i < quads) {   /* runs of quads on the same texture */
+		int j = i;
+		while (j < quads && ui_tex[j] == ui_tex[i]) j++;
+		C3D_TexBind(0, ui_texture(ui_tex[i]));
+		C3D_DrawArrays(GPU_TRIANGLES, i * 6, (j - i) * 6);
+		i = j;
+	}
 }
 
 void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_verts, int player_verts, int battle_verts, const Light *L, const Overlay *ov, const UiList *ui) {
@@ -339,7 +386,7 @@ void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_ve
 	int ovn = voxel ? build_overlay(ov, oq, &dim) : 0;
 	if (ovn) GSPGPU_FlushDataCache(oq, sizeof(WVert) * ovn);
 	WVert *uq = ui_quads + ov_flip * 6 * FRUI_MAX_QUADS;
-	int uin = voxel ? build_ui(ui, uq) : 0;
+	int uin = build_ui(ui, uq);
 	if (uin) GSPGPU_FlushDataCache(uq, sizeof(WVert) * uin);
 	if (sprite_verts > 0) GSPGPU_FlushDataCache(spr, sizeof(WVert) * sprite_verts);
 	if (shadow_verts > 0) GSPGPU_FlushDataCache(shadows, sizeof(WVert) * shadow_verts);
@@ -360,6 +407,10 @@ void render_frame(bool voxel, const Camera *cam, int sprite_verts, int shadow_ve
 			draw_overlay(oq, ovn, dim);
 			draw_ui(uq, uin);
 		}
+	} else if (uin) {   /* a restyled full screen with no world behind it */
+		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, 0x101218FF, 0);
+		C3D_FrameDrawOn(top_l);
+		draw_ui(uq, uin);
 	} else {
 		C3D_RenderTargetClear(top_l, C3D_CLEAR_ALL, 0x101218FF, 0);
 		C3D_FrameDrawOn(top_l);

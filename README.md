@@ -49,7 +49,7 @@ Everything then happens on the top screen:
 - Talking and signs: Gold's text box along the bottom at 2x, with YES/NO and
   other small boxes just above it.
 - The START menu, party, bag, Pokédex and other full-screen menus: the whole
-  Game Boy picture in the middle, with the 3D world dimmed behind.
+  screen in the middle, with the 3D world dimmed behind.
 - 3D battles: the opponent's HP box top-left, yours on the right, and the
   text and move menus along the bottom, around the Pokémon in the world.
 - Anywhere else (title screen, battles without FireRed): the Game Boy picture.
@@ -66,8 +66,16 @@ font, its dialogue box with the "more text" arrow, its menu frame for the START
 menu, YES/NO and other boxes, and in battle its message panel, FIGHT/PKMN/PACK/RUN
 panel, HP boxes with HP and EXP bars, and a move list with PP and type. The
 text, cursor and numbers come from Gold each frame, so Gold's menus work as
-always. Screens it can't restyle yet (party, bag, Pokédex, PC, naming) show
-Gold's own picture.
+always.
+
+Full screens are restyled too: the party, its menu, the summary pages, the bag,
+the Pokégear, the trainer card, options, naming and save screens and Pokédex
+entries are laid out at 1.5x in a FireRed window, with Gold's boxes redrawn as
+FireRed frames, its text in FireRed's font, FireRed's HP bars, FireRed's picture
+of the Pokémon on summary and Pokédex pages, and FireRed's hopping party icons.
+Gold's other artwork on those screens is drawn over the window with its lightest
+shade see-through. A screen that scrolls or only partly covers the picture (the
+Pokédex list, for one) keeps Gold's own picture.
 
 ## Day and night
 

@@ -13,15 +13,28 @@
 #include "frpics.h"
 
 #define FRUI_TEX 512            /* the UI atlas is FRUI_TEX x FRUI_TEX RGBA */
-#define FRUI_MAX_QUADS 900
+#define FRUI_MAX_QUADS 1200
+
+/* textures a quad can use; u/v are in that texture's pixels */
+enum {
+	UI_TEX_ATLAS,               /* the FireRed interface atlas, FRUI_TEX square */
+	UI_TEX_LCD,                 /* Gold's own picture, 256x256 (160x144 used) */
+	UI_TEX_PIC,                 /* one Pokémon picture, 64x64 (UiList.pic_species) */
+	UI_TEX_ICONS                /* party icons, 32x32 each side by side, 256x32 (UiList.icon_species) */
+};
 
 typedef struct {
 	float x, y, w, h;           /* on the 400x240 top screen */
-	float u0, v0, u1, v1;       /* atlas pixels */
+	float u0, v0, u1, v1;       /* texture pixels */
+	uint8_t tex;
 } UiQuad;
 
 typedef struct {
 	int n;
+	bool dim;                   /* darken the 3D behind */
+	int pic_species;            /* the picture UI_TEX_PIC must hold, 0 = none */
+	bool pic_shiny;
+	int icon_species[6];        /* the icons UI_TEX_ICONS must hold, 0 = none */
 	UiQuad q[FRUI_MAX_QUADS];
 } UiList;
 

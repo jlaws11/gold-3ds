@@ -30,6 +30,8 @@ void render_tall_sheet(const uint32_t *rgba); /* TALL_TEX_W x TALL_TEX_H */
 WVert *render_battle_buf(void);               /* 12 vertices: the two Pokémon */
 void render_battle_sheet(const uint32_t *rgba); /* BATTLE_TEX_W x BATTLE_TEX_H */
 void render_ui_atlas(const uint32_t *rgba);     /* FRUI_TEX x FRUI_TEX: the FireRed-style interface */
+void render_ui_pic(const uint32_t *rgba);       /* 64x64: the Pokémon picture a full screen shows */
+void render_ui_icons(const uint32_t *rgba);     /* 256x32: up to six party icons */
 
 /* One frame. voxel=false shows the Game Boy picture on the top screen instead.
  * ov (single-screen mode, may be NULL): parts of the Game Boy picture drawn over the 3D.

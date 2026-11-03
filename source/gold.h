@@ -22,6 +22,10 @@
 #define wMapStatus               0xD159   /* 2 = MAPSTATUS_HANDLE (overworld loop) */
 #define wTimeOfDayPal            0xD568   /* 0 morn, 1 day, 2 nite, 3 dark */
 #define wPlayerState             0xD682   /* 0 walking, 1 bike, 4 surf */
+#define wCurPartySpecies         0xD004
+#define wTempMonSpecies          0xD00B
+#define wPartyCount              0xDA22
+#define wPartySpecies            0xDA23
 #define wMapGroup                0xDA00
 #define wMapNumber               0xDA01
 #define wYCoord                  0xDA02

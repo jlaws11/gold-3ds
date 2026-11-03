@@ -218,6 +218,8 @@ int main(void) {
 		free(ui_atlas);
 	}
 	static UiList ui;
+	static uint32_t ui_pic[64 * 64], ui_icons[256 * 32], icon_one[32 * 32];
+	int pic_loaded = -1, icons_loaded[6] = { -1, -1, -1, -1, -1, -1 }, icon_frame = -1;
 
 	GoldView g = { rom, rom_size, core_peek, NULL };
 	WorldMesh *mesh = render_mesh();
@@ -365,11 +367,31 @@ int main(void) {
 			if (fr_ui) {
 				/* FireRed's look where it can restyle the screen; Gold's picture where it can't */
 				FruiResult r = frui_plan(&g, overworld, battle.active, &ui);
-				if (r == FRUI_DRAWN) { overlay.n = 0; overlay.dim = false; uip = &ui; }
+				if (r == FRUI_DRAWN) {
+					overlay.n = 0; overlay.dim = false; uip = &ui;
+					/* the Pokémon picture and party icons this screen asks for */
+					int want = ui.pic_species ? ui.pic_species * 2 + ui.pic_shiny : 0;
+					if (want && want != pic_loaded) {
+						int bottom;
+						if (fr_mon_pic(gba_read, NULL, frt, ui.pic_species, false, ui.pic_shiny, ui_pic, &bottom)) render_ui_pic(ui_pic);
+						pic_loaded = want;
+					}
+					int f = (frame / 16) & 1;   /* the icons hop like Gold's */
+					bool changed = f != icon_frame;
+					for (int i = 0; i < 6; i++) {
+						if (!ui.icon_species[i] || (!changed && ui.icon_species[i] == icons_loaded[i])) continue;
+						if (fr_mon_icon(gba_read, NULL, frt, ui.icon_species[i], f, icon_one))
+							for (int y = 0; y < 32; y++) memcpy(ui_icons + y * 256 + i * 32, icon_one + y * 32, 32 * 4);
+						icons_loaded[i] = ui.icon_species[i];
+						changed = true;
+					}
+					if (changed) { render_ui_icons(ui_icons); icon_frame = f; }
+				}
 				else if (r == FRUI_NONE) { overlay.n = 0; overlay.dim = false; }
 			}
 		}
-		render_frame(show3d, &cam, nspr, nshadow, nplayer, nbattle, &light, single ? &overlay : NULL, uip);
+		if (!show3d && !(single && voxel)) uip = NULL;   /* X shows Gold's own picture */
+	render_frame(show3d, &cam, nspr, nshadow, nplayer, nbattle, &light, single ? &overlay : NULL, uip);
 
 		/* save once the game's save data has changed and then stayed still for 2 seconds */
 		if (++frame % 120 == 0) {

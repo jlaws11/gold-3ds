@@ -27,8 +27,16 @@
 enum { PANEL_MSG, PANEL_ACTION, PANEL_MOVES };
 enum { FONT_DARK, FONT_LIGHT, FONT_SMALL };
 
-static int16_t slot_of[256];          /* FireRed glyph code -> atlas slot, -1 if absent */
-static uint8_t width_normal[256], width_small[256];
+static int16_t slot_of[512];          /* FireRed glyph code -> atlas slot, -1 if absent */
+static uint8_t width_normal[512], width_small[512];
+
+/* FireRed's extended glyphs (its F9 xx codes) */
+#define G_LV        0x105
+#define G_PP        0x106
+#define G_ID        0x107
+#define G_NO        0x108
+#define G_UNDERLINE 0x109
+static bool page_mode;   /* full screens: a few Gold tiles mean something else there */
 static bool loaded;
 
 /* ---- decoding ---------------------------------------------------------------- */
@@ -87,14 +95,16 @@ bool frui_load(FrRead rd, void *ctx, const FrTables *t, uint32_t *atlas) {
 	palette(p, bar_pal);
 
 	/* fonts: only the glyphs Gold's text can map to */
-	if (!rd(ctx, t->font_widths, width_normal, 256) || !rd(ctx, t->font_small_widths, width_small, 256)) return false;
-	for (int i = 0; i < 256; i++) slot_of[i] = -1;
+	if (!rd(ctx, t->font_widths, width_normal, 512) || !rd(ctx, t->font_small_widths, width_small, 512)) return false;
+	for (int i = 0; i < 512; i++) slot_of[i] = -1;
 	int slots = 0;
+	static const uint16_t extra[] = { G_LV, G_PP, G_ID, G_NO, G_UNDERLINE };
+	for (unsigned i = 0; i < sizeof extra / sizeof extra[0]; i++) slot_of[extra[i]] = slots++;
 	for (int c = 0; c < 256; c++) for (int k = 0; k < 2; k++) {
 		uint8_t code = gold_to_fr[c][k];
 		if (code != 0xFF && slot_of[code] < 0 && slots < 128) slot_of[code] = slots++;
 	}
-	for (int code = 0; code < 256; code++) {
+	for (int code = 0; code < 512; code++) {
 		int s = slot_of[code];
 		if (s < 0) continue;
 		if (!rd(ctx, t->font + code * 64, g, 64)) return false;
@@ -164,10 +174,14 @@ bool frui_load(FrRead rd, void *ctx, const FrTables *t, uint32_t *atlas) {
 
 /* ---- drawing primitives ----------------------------------------------------- */
 
-static void quad(UiList *l, float x, float y, float w, float h, float u0, float v0, float u1, float v1) {
+static void quadt(UiList *l, int tex, float x, float y, float w, float h, float u0, float v0, float u1, float v1) {
 	if (l->n >= FRUI_MAX_QUADS) return;
-	UiQuad q = { x, y, w, h, u0, v0, u1, v1 };
+	UiQuad q = { x, y, w, h, u0, v0, u1, v1, (uint8_t)tex };
 	l->q[l->n++] = q;
+}
+
+static void quad(UiList *l, float x, float y, float w, float h, float u0, float v0, float u1, float v1) {
+	quadt(l, UI_TEX_ATLAS, x, y, w, h, u0, v0, u1, v1);
 }
 
 /* a w x h piece of the atlas at (ax, ay), drawn 1:1; vflip mirrors it vertically */
@@ -176,16 +190,16 @@ static void piece(UiList *l, float x, float y, int ax, int ay, int w, int h, boo
 	else       quad(l, x, y, w, h, ax, ay, ax + w, ay + h);
 }
 
-static int glyph_width(int font, uint8_t code) {
+static int glyph_width(int font, uint16_t code) {
 	int w = font == FONT_SMALL ? width_small[code] : width_normal[code];
 	return w ? w : 6;
 }
 
 /* FireRed glyph codes at (x, y): the top of the 16-px glyph cell. Returns the width. */
-static int text_fr(UiList *l, int font, float x, float y, const uint8_t *codes, int n) {
+static int text_fr(UiList *l, int font, float x, float y, const uint16_t *codes, int n) {
 	float x0 = x;
 	for (int i = 0; i < n; i++) {
-		uint8_t c = codes[i];
+		uint16_t c = codes[i] & 0x1FF;
 		int s = slot_of[c];
 		if (c == ARROW_CODE && font != FONT_SMALL) {
 			piece(l, x + 1, y + 2, AT_ARROW_X, AT_ARROW_Y, 10, 12, false);
@@ -204,11 +218,19 @@ static int text_fr(UiList *l, int font, float x, float y, const uint8_t *codes, 
 }
 
 /* Gold text codes -> FireRed codes; returns the count */
-static int gold_text(const uint8_t *gold, int n, uint8_t *out, int cap) {
+static int gold_text(const uint8_t *gold, int n, uint16_t *out, int cap) {
 	int m = 0;
-	for (int i = 0; i < n && m < cap; i++)
+	for (int i = 0; i < n && m < cap; i++) {
+		uint8_t t = gold[i];
+		uint16_t special = t == 0x6E ? G_LV : t == 0x73 ? G_ID : t == 0x74 ? G_NO :
+		                   (page_mode && t == 0xEB) ? G_UNDERLINE : 0;
+		if (page_mode && t == 0x3E && i + 1 < n && gold[i + 1] == 0x3E) { out[m++] = G_PP; i++; continue; }
+		if (special) { out[m++] = special; continue; }
+		/* the Pokédex's feet and inches marks come after a digit */
+		if (page_mode && (t == 0x5E || t == 0x5F) && i > 0 && gold[i - 1] >= 0xF6) { out[m++] = t == 0x5E ? 0xB4 : 0xB2; continue; }
 		for (int k = 0; k < 2 && m < cap; k++)
-			if (gold_to_fr[gold[i]][k] != 0xFF) out[m++] = gold_to_fr[gold[i]][k];
+			if (gold_to_fr[t][k] != 0xFF) out[m++] = gold_to_fr[t][k];
+	}
 	return m;
 }
 
@@ -232,7 +254,7 @@ static void gold_row(UiList *l, const GoldView *g, int font, float x, float y, i
 			if (n < 24) run[n++] = tm(g, r, c);
 			c++;
 		}
-		uint8_t fr[48];
+		uint16_t fr[48];
 		int m = gold_text(run, n, fr, 48);
 		text_fr(l, font, x + (start - c0) * 6, y, fr, m);
 	}
@@ -243,20 +265,30 @@ static bool row_has_text(const GoldView *g, int r, int c0, int c1) {
 	return false;
 }
 
-/* 9-slice from 8x8 tiles: tl, top, tr, left, fill, right, bl, bottom, br */
+/* 9-slice from 8x8 tiles: tl, top, tr, left, fill, right, bl, bottom, br. Edges and
+ * fill are uniform along their length, so each is one stretched piece. */
 static void frame9(UiList *l, float x, float y, int w, int h, int ax, int ay, const int tiles[9]) {
-	int cols = w / 8, rows = h / 8;
-	for (int r = 0; r < rows; r++)
-		for (int c = 0; c < cols; c++) {
-			int k = (r == 0 ? 0 : r == rows - 1 ? 6 : 3) + (c == 0 ? 0 : c == cols - 1 ? 2 : 1);
-			piece(l, x + c * 8, y + r * 8, ax + tiles[k] * 8, ay, 8, 8, false);
-		}
+	float iw = w - 16, ih = h - 16;
+	#define T(k) (ax + tiles[k] * 8)
+	piece(l, x, y, T(0), ay, 8, 8, false);
+	piece(l, x + w - 8, y, T(2), ay, 8, 8, false);
+	piece(l, x, y + h - 8, T(6), ay, 8, 8, false);
+	piece(l, x + w - 8, y + h - 8, T(8), ay, 8, 8, false);
+	if (iw > 0) {
+		quad(l, x + 8, y, iw, 8, T(1) + 3.5f, ay, T(1) + 4.5f, ay + 8);
+		quad(l, x + 8, y + h - 8, iw, 8, T(7) + 3.5f, ay, T(7) + 4.5f, ay + 8);
+	}
+	if (ih > 0) {
+		quad(l, x, y + 8, 8, ih, T(3), ay + 3.5f, T(3) + 8, ay + 4.5f);
+		quad(l, x + w - 8, y + 8, 8, ih, T(5), ay + 3.5f, T(5) + 8, ay + 4.5f);
+	}
+	if (iw > 0 && ih > 0) quad(l, x + 8, y + 8, iw, ih, T(4) + 3.5f, ay + 3.5f, T(4) + 4.5f, ay + 4.5f);
+	#undef T
 }
 
 /* FireRed menu window around an interior of iw x ih */
 static void menu_window(UiList *l, float x, float y, int iw, int ih) {
 	static const int t[9] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
-	iw = (iw + 7) / 8 * 8; ih = (ih + 7) / 8 * 8;
 	frame9(l, x, y, iw + 16, ih + 16, AT_MENU_X, AT_MENU_Y, t);
 }
 
@@ -266,15 +298,17 @@ static void dialogue_box(UiList *l, float x, float y, int iw) {
 	static const int8_t rows[6][5] = {
 		{ 0, 1, 2, 3, 4 }, { 5, 6, 7, 8, 9 }, { 10, 11, 7, 12, 13 },
 		{ 10, 11, 7, 12, 13 }, { 5, 6, 7, 8, 9 }, { 0, 1, 2, 3, 4 } };
-	int cols = iw / 8;
 	for (int r = 0; r < 6; r++) {
 		bool vf = r >= 3;
-		for (int c = 0; c < cols + 4; c++) {
-			int k = c == 0 ? 0 : c == 1 ? 1 : c == cols + 2 ? 3 : c == cols + 3 ? 4 : 2;
-			int t = rows[r][k];
-			if (r >= 1 && r <= 4 && k == 2) t = 7;   /* white inside */
-			piece(l, x + c * 8, y + r * 8, AT_DLG_X + t * 8, AT_DLG_Y, 8, 8, vf);
-		}
+		const int8_t *t = rows[r];
+		float yy = y + r * 8;
+		piece(l, x, yy, AT_DLG_X + t[0] * 8, AT_DLG_Y, 8, 8, vf);
+		piece(l, x + 8, yy, AT_DLG_X + t[1] * 8, AT_DLG_Y, 8, 8, vf);
+		int mid = (r >= 1 && r <= 4) ? 7 : t[2];          /* white inside */
+		float u = AT_DLG_X + mid * 8 + 3.5f, v0 = vf ? AT_DLG_Y + 8 : AT_DLG_Y, v1 = vf ? AT_DLG_Y : AT_DLG_Y + 8;
+		quad(l, x + 16, yy, iw, 8, u, v0, u + 1, v1);
+		piece(l, x + 16 + iw, yy, AT_DLG_X + t[3] * 8, AT_DLG_Y, 8, 8, vf);
+		piece(l, x + 24 + iw, yy, AT_DLG_X + t[4] * 8, AT_DLG_Y, 8, 8, vf);
 	}
 }
 
@@ -283,17 +317,21 @@ static void panel(UiList *l, float x, float y, int which) {
 	piece(l, x, y, 0, AT_PANEL_Y + which * 48, 240, 48, false);
 }
 
-/* a box cut from a battle panel (source x0..x1, 48 tall), stretched to w x h by
- * repeating its middle in 8-px steps */
+/* a box cut from a battle panel (source x0..x1, 48 tall), stretched to w x h:
+ * 8-px corners, edges and middle stretched */
 static void panel_box(UiList *l, float x, float y, int w, int h, int which, int sx0, int sx1) {
 	int ay = AT_PANEL_Y + which * 48;
-	int cols = w / 8, rows = h / 8;
-	for (int r = 0; r < rows; r++)
-		for (int c = 0; c < cols; c++) {
-			int sc = c == 0 ? sx0 : c == cols - 1 ? sx1 - 8 : sx0 + 8 + ((c - 1) % ((sx1 - sx0 - 16) / 8)) * 8;
-			int sr = r == 0 ? 0 : r == rows - 1 ? 40 : 8 + ((r - 1) % 4) * 8;
-			piece(l, x + c * 8, y + r * 8, sc, ay + sr, 8, 8, false);
-		}
+	float iw = w - 16, ih = h - 16;
+	piece(l, x, y, sx0, ay, 8, 8, false);
+	piece(l, x + w - 8, y, sx1 - 8, ay, 8, 8, false);
+	piece(l, x, y + h - 8, sx0, ay + 40, 8, 8, false);
+	piece(l, x + w - 8, y + h - 8, sx1 - 8, ay + 40, 8, 8, false);
+	float mu = (sx0 + sx1) / 2.0f, mv = ay + 24;
+	quad(l, x + 8, y, iw, 8, mu, ay, mu + 1, ay + 8);
+	quad(l, x + 8, y + h - 8, iw, 8, mu, ay + 40, mu + 1, ay + 48);
+	quad(l, x, y + 8, 8, ih, sx0, mv, sx0 + 8, mv + 1);
+	quad(l, x + w - 8, y + 8, 8, ih, sx1 - 8, mv, sx1, mv + 1);
+	quad(l, x + 8, y + 8, iw, ih, mu, mv, mu + 1, mv + 1);
 }
 
 /* ---- HP boxes ------------------------------------------------------------------ */
@@ -324,7 +362,7 @@ static void exp_bar(UiList *l, float x, float y, int px) {
 /* name, level and gender from Gold's own HP box row: name from c0, ":L" + digits after */
 static void name_level(UiList *l, const GoldView *g, int name_row, int name_c0, int lv_row,
                        float nx, float ny, float lx) {
-	uint8_t run[12], fr[24]; int n = 0;
+	uint8_t run[12]; uint16_t fr[24]; int n = 0;
 	for (int c = name_c0; c < 20 && n < 11; c++) {
 		uint8_t t = tm(g, name_row, c);
 		if (is_blank(t)) break;
@@ -342,9 +380,9 @@ static void name_level(UiList *l, const GoldView *g, int name_row, int name_c0, 
 }
 
 static void number(UiList *l, float right_x, float y, int v) {
-	uint8_t d[5]; int n = 0;
+	uint16_t d[5]; int n = 0;
 	do { d[n++] = 0xA1 + v % 10; v /= 10; } while (v && n < 5);
-	uint8_t s[5];
+	uint16_t s[5];
 	for (int i = 0; i < n; i++) s[i] = d[n - 1 - i];
 	int w = 0;
 	for (int i = 0; i < n; i++) w += glyph_width(FONT_SMALL, s[i]);
@@ -446,8 +484,179 @@ static void field_screen(const GoldView *g, UiList *l, const Win *w, int n) {
 	}
 }
 
+
+/* ---- full screens: party, bag, summary, Pokédex, options, naming... ------------
+ * Gold's 20x18 screen is laid out at 1.5x (12-px cells) in the middle of the top
+ * screen, inside a FireRed window: text in FireRed's font, Gold's windows in
+ * FireRed's frame, HP bars as FireRed's, Pokémon pictures and party icons from
+ * FireRed, and any other artwork copied from Gold's own picture. */
+
+#define PG_C 12
+#define PG_X ((SCREEN_W - 20 * PG_C) / 2)
+#define PG_Y ((SCREEN_H - 18 * PG_C) / 2)
+
+static float pgx(int c) { return PG_X + c * PG_C; }
+static float pgy(int r) { return PG_Y + r * PG_C; }
+
+/* letters, digits and punctuation (not the HP-bar and box pieces at 0x60-0x7E) */
+static bool page_text(const GoldView *g, int r, int c) {
+	uint8_t t = tm(g, r, c);
+	if (t == 0x6E || t == 0x73 || t == 0x74) return true;           /* Lv, ID, No */
+	if (t == 0x3E && ((c < 19 && tm(g, r, c + 1) == 0x3E) || (c > 0 && tm(g, r, c - 1) == 0x3E))) return true;   /* PP */
+	if ((t == 0x5E || t == 0x5F) && c > 0 && tm(g, r, c - 1) >= 0xF6) return true;   /* ′ ″ */
+	if (t >= 0x80) return gold_to_fr[t][0] != 0xFF;
+	if ((t == 0x70 || t == 0x71) && c < 19) return tm(g, r, c + 1) >= 0x80 || tm(g, r, c + 1) == 0x71;
+	return false;
+}
+
+/* a 7x7 Pokémon picture: tiles in column order from 0, or mirrored */
+static int pic_at(const GoldView *g, int r, int c) {
+	if (r > 11 || c > 13) return 0;
+	uint8_t b = tm(g, r, c);
+	bool fwd = true, rev = true;
+	for (int j = 0; j < 7 && (fwd || rev); j++)
+		for (int i = 0; i < 7; i++) {
+			uint8_t t = tm(g, r + i, c + j);
+			if (t != (uint8_t)(b + j * 7 + i)) fwd = false;
+			if (t != (uint8_t)(b - j * 7 + i)) rev = false;
+		}
+	return fwd ? 1 : rev ? -1 : 0;
+}
+
+static bool hp_bar_at(const GoldView *g, int r, int c, int *px) {
+	if (c > 11 || tm(g, r, c) != 0x60 || tm(g, r, c + 1) != 0x61) return false;
+	int sum = 0;
+	for (int i = 0; i < 6; i++) {
+		int t = tm(g, r, c + 2 + i) - 0x62;
+		if (t < 0 || t > 8) return false;
+		sum += t;
+	}
+	*px = sum;
+	return true;
+}
+
+/* Gold's picture for a run of cells (sx: Gold's horizontal scroll) */
+static void lcd_cells(UiList *l, int r, int c0, int c1, int sx) {
+	quadt(l, UI_TEX_LCD, pgx(c0), pgy(r), (c1 - c0 + 1) * PG_C, PG_C,
+	      c0 * 8 - sx + 0.01f, r * 8 + 0.01f, (c1 + 1) * 8 - sx - 0.01f, r * 8 + 8 - 0.01f);
+}
+
+static FruiResult page_screen(const GoldView *g, UiList *l) {
+	/* only when Gold's screen buffer is what's shown: no real scrolling, and the
+	 * window layer off or covering the whole screen */
+	uint8_t scx = gv8(g, 0xFF43), scy = gv8(g, 0xFF42), wx = gv8(g, 0xFF4B), wy = gv8(g, 0xFF4A);
+	bool window_part = !(wy >= 144 || wx >= 167 || (wx <= 7 && wy == 0));
+	if (scx >= 8 || scy != 0 || window_part) return FRUI_FALLBACK;
+	int sx = scx;
+
+	l->n = 0; l->dim = true;
+	page_mode = true;
+	menu_window(l, PG_X - 8, PG_Y - 8, 20 * PG_C, 18 * PG_C);
+
+	static uint8_t done[18][20];
+	memset(done, 0, sizeof done);
+	Win w[12];
+	int nw = find_windows(g, w, 12);
+	for (int i = 0; i < nw; i++) {
+		const Win *b = &w[i];
+		float x = pgx(b->c0) + 2, y = pgy(b->r0) + 2;
+		int iw = (b->c1 - b->c0 + 1) * PG_C - 4 - 16, ih = (b->r1 - b->r0 + 1) * PG_C - 4 - 16;
+		menu_window(l, x, y, iw < 8 ? 8 : iw, ih < 8 ? 8 : ih);
+		for (int c = b->c0; c <= b->c1; c++) { done[b->r0][c] = done[b->r1][c] = 1; }
+		for (int r = b->r0; r <= b->r1; r++) { done[r][b->c0] = done[r][b->c1] = 1; }
+	}
+
+	/* Pokémon pictures */
+	for (int r = 0; r < 18; r++) for (int c = 0; c < 20; c++) {
+		int dir = done[r][c] ? 0 : pic_at(g, r, c);
+		if (!dir) continue;
+		int sp = gv8(g, wTempMonSpecies);
+		if (sp == 0 || sp > 251) sp = gv8(g, wCurPartySpecies);
+		if (sp >= 1 && sp <= 251) {
+			l->pic_species = sp;
+			float x = pgx(c) + (7 * PG_C - 64) / 2.0f - sx * 1.5f, y = pgy(r) + (7 * PG_C - 64) / 2.0f;
+			if (dir > 0) quadt(l, UI_TEX_PIC, x, y, 64, 64, 0, 0, 64, 64);
+			else         quadt(l, UI_TEX_PIC, x, y, 64, 64, 64, 0, 0, 64);
+			for (int i = 0; i < 7; i++) for (int j = 0; j < 7; j++) done[r + i][c + j] = 1;
+		}
+	}
+
+	/* HP bars */
+	for (int r = 0; r < 18; r++) for (int c = 0; c < 20; c++) {
+		int px;
+		if (done[r][c] || !hp_bar_at(g, r, c, &px)) continue;
+		int k = c + 8;
+		while (k < 20 && (tm(g, r, k) == 0x6B || tm(g, r, k) == 0x6C)) k++;
+		hp_bar(l, pgx(c) - sx * 1.5f, pgy(r) + 2, px, 48);
+		for (int i = c; i < k; i++) done[r][i] = 1;
+	}
+
+	/* artwork from Gold's picture, then text on top */
+	for (int r = 0; r < 18; r++) {
+		int c = 0;
+		while (c < 20) {
+			uint8_t t = tm(g, r, c);
+			bool art = !done[r][c] && t != 0x7F && !page_text(g, r, c);
+			if (!art) { c++; continue; }
+			int c1 = c;
+			while (c1 + 1 < 20 && !done[r][c1 + 1] && tm(g, r, c1 + 1) != 0x7F && !page_text(g, r, c1 + 1)) c1++;
+			lcd_cells(l, r, c, c1, sx);
+			c = c1 + 1;
+		}
+	}
+	for (int r = 0; r < 18; r++) {
+		int c = 0;
+		while (c < 20) {
+			if (done[r][c] || !page_text(g, r, c)) { c++; continue; }
+			int start = c;
+			uint8_t run[24]; int n = 0;
+			/* a run: text cells, with single spaces inside */
+			while (c < 20 && !done[r][c] && (page_text(g, r, c) ||
+			       (tm(g, r, c) == 0x7F && c + 1 < 20 && page_text(g, r, c + 1) && n > 0))) {
+				if (n < 24) run[n++] = tm(g, r, c);
+				c++;
+			}
+			uint16_t fr[48];
+			text_fr(l, FONT_DARK, pgx(start) - sx * 1.5f, pgy(r) - 2, fr, gold_text(run, n, fr, 48));
+		}
+	}
+
+	/* sprites: party icons become FireRed's; anything else is copied from Gold's picture.
+	 * Party icons only appear on screens listing the party, which show HP bars. */
+	bool party_list = false;
+	for (int r = 0; r < 18 && !party_list; r++) for (int c = 0; c < 20; c++) { int px; if (hp_bar_at(g, r, c, &px)) { party_list = true; break; } }
+	int count = party_list ? gv8(g, wPartyCount) : 0;
+	int icon_y[6], ni = 0;
+	for (int i = 0; i < 40; i++) {
+		int y = gv8(g, 0xFE00 + i * 4) - 16, x = gv8(g, 0xFE01 + i * 4) - 8;
+		if (y <= -16 || y >= 144 || x <= -8 || x >= 160) continue;
+		bool top_left = true;
+		for (int j = 0; j < 40; j++) {
+			int y2 = gv8(g, 0xFE00 + j * 4) - 16, x2 = gv8(g, 0xFE01 + j * 4) - 8;
+			if ((x2 == x - 8 && y2 == y) || (x2 == x && y2 == y - 8)) top_left = false;
+		}
+		/* party icons sit in the left column, 16 px apart */
+		if (top_left && x < 24 && count > 0 && count <= 6 && ni < count) { icon_y[ni++] = y; continue; }
+		if (x >= 24 || count == 0)
+			quadt(l, UI_TEX_LCD, PG_X + x * 1.5f, PG_Y + y * 1.5f, 12, 12, x + 0.01f, y + 0.01f, x + 7.99f, y + 7.99f);
+	}
+	if (ni == count && count > 0) {
+		for (int i = 0; i < ni; i++) {
+			int k = 0;
+			for (int j = 0; j < ni; j++) if (icon_y[j] < icon_y[i]) k++;   /* top to bottom = party order */
+			int sp = gv8(g, wPartySpecies + k);
+			if (sp < 1 || sp > 251) continue;
+			l->icon_species[k] = sp;
+			quadt(l, UI_TEX_ICONS, PG_X + 8 * 1.5f + 12 - 16, PG_Y + icon_y[i] * 1.5f + 12 - 18, 32, 32, k * 32, 0, k * 32 + 32, 32);
+		}
+	}
+	return FRUI_DRAWN;
+}
+
 FruiResult frui_plan(const GoldView *g, bool field, bool battle3d, UiList *l) {
-	l->n = 0;
+	l->n = 0; l->dim = false; l->pic_species = 0; l->pic_shiny = false;
+	page_mode = false;
+	for (int i = 0; i < 6; i++) l->icon_species[i] = 0;
 	if (!loaded) return FRUI_FALLBACK;
 	bool textbox = tm(g, 12, 0) == 0x79 && tm(g, 17, 0) == 0x7D && tm(g, 17, 19) == 0x7E;
 
@@ -456,7 +665,7 @@ FruiResult frui_plan(const GoldView *g, bool field, bool battle3d, UiList *l) {
 		bool ours_out = gv8(g, wBattleMonSpecies) != 0 && enemy_hp;
 		bool move_list = enemy_hp && tm(g, 8, 0) == 0x79 && tm(g, 12, 0) == 0x7D && tm(g, 17, 19) == 0x7E;
 		bool action = textbox && tm(g, 12, 8) == 0x79 && tm(g, 17, 8) == 0x7D;
-		if (!textbox && !move_list) return FRUI_FALLBACK;             /* party, bag, ... */
+		if (!textbox && !move_list) return page_screen(g, l);         /* party, bag, ... */
 
 		if (enemy_hp) enemy_box(l, g, 8, 8);
 		if (ours_out) player_box(l, g, SCREEN_W - 8 - 104 - 8, PANEL_Y - 48 - (move_list ? 40 : 0));
@@ -469,10 +678,10 @@ FruiResult frui_plan(const GoldView *g, bool field, bool battle3d, UiList *l) {
 				gold_row(l, g, FONT_DARK, x + 10, y + 8 + (r - 13) * 16 - 1, r, 5, 18);
 			float px = x + bw, py = SCREEN_H - 48;
 			panel_box(l, px, py, 96, 48, PANEL_MOVES, 160, 240);
-			uint8_t pp[8], fr[16]; int n = 0;
+			uint8_t pp[8]; uint16_t fr[16]; int n = 0;
 			for (int c = 1; c <= 9 && n < 8; c++) if (!is_blank(tm(g, 11, c))) pp[n++] = tm(g, 11, c);
-			static const uint8_t PPlabel[2] = { 0xCA, 0xCA };   /* "PP" */
-			int w = text_fr(l, FONT_DARK, px + 10, py + 7, PPlabel, 2);
+			static const uint16_t PPlabel[1] = { G_PP };
+			int w = text_fr(l, FONT_DARK, px + 10, py + 7, PPlabel, 1);
 			text_fr(l, FONT_DARK, px + 10 + w + 6, py + 7, fr, gold_text(pp, n, fr, 16));
 			gold_row(l, g, FONT_DARK, px + 10, py + 23, 10, 1, 9);   /* the type, under "TYPE/" */
 			return FRUI_DRAWN;
@@ -496,12 +705,12 @@ FruiResult frui_plan(const GoldView *g, bool field, bool battle3d, UiList *l) {
 	if (!field) return FRUI_NONE;
 	Win w[8];
 	int n = find_windows(g, w, 8);
-	if (n == 0) return FRUI_NONE;
-	if (stray_text(g, w, n)) return FRUI_FALLBACK;
+	if (n == 0) return stray_text(g, w, 0) ? page_screen(g, l) : FRUI_NONE;
+	if (stray_text(g, w, n)) return page_screen(g, l);
 	/* a window covering most of the screen is a full-screen menu */
 	for (int i = 0; i < n; i++)
 		if ((w[i].c1 - w[i].c0 + 1) * (w[i].r1 - w[i].r0 + 1) > 200 && !(w[i].c0 == 0 && w[i].r1 == 17 && w[i].r0 >= 12))
-			return FRUI_FALLBACK;
+			return page_screen(g, l);
 	field_screen(g, l, w, n);
 	return FRUI_DRAWN;
 }
