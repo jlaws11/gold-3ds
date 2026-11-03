@@ -274,8 +274,8 @@ static void emit_grass(WorldMesh *m, float X, float Z, const uint8_t t[4], int g
 		float ht = 8.0f + ((h >> 4) & 3) * 0.7f;        /* 8-10 px: about knee height on Red */
 		float w = 9.0f, a = 0.785f + ((h >> 6) & 3) * 0.12f;
 		int tile = CUTOUT + t[k];
-		float lit = lambert(0, 0.6f, 0.8f), dark = lit * (1.0f - LT->shadow);
-		float top = in_shadow(cx, ht, cz, 2) ? dark : lit, root = (in_shadow(cx, 0, cz, 2) ? dark : lit) * 0.62f;
+		float lit = 1.0f, dark = lit * (1.0f - LT->shadow * 0.8f);   /* tips catch the light */
+		float top = in_shadow(cx, ht, cz, 2) ? dark : lit, root = (in_shadow(cx, 0, cz, 2) ? dark : lit) * 0.74f;
 		for (int c = 0; c < 2; c++) {
 			float ang = a + c * 1.5708f, dx = cosf(ang) * w / 2, dz = sinf(ang) * w / 2;
 			quad4(m, p3(cx - dx, ht, cz - dz), p3(cx + dx, ht, cz + dz),
@@ -446,6 +446,15 @@ static void tile_row(const GoldView *g, uint16_t base, int row, uint8_t px[8]) {
 	for (int b = 0; b < 8; b++) px[b] = ((lo >> (7 - b)) & 1) | (((hi >> (7 - b)) & 1) << 1);
 }
 
+static uint32_t lighten(uint32_t c, uint32_t toward, float t) {
+	uint32_t out = 0xFF;
+	for (int sh = 24; sh >= 8; sh -= 8) {
+		float a = (c >> sh) & 255, b = (toward >> sh) & 255;
+		out |= (uint32_t)(a + (b - a) * t) << sh;
+	}
+	return out;
+}
+
 void world_bg_atlas(const GoldView *g, uint32_t *rgba) {
 	uint32_t palmap = current_palmap(g);
 	int tod = gv8(g, wTimeOfDayPal) & 3;
@@ -463,7 +472,12 @@ void world_bg_atlas(const GoldView *g, uint32_t *rgba) {
 			uint8_t px[8]; tile_row(g, base, row, px);
 			uint32_t *dst = rgba + ((t / 16) * 8 + row) * BG_ATLAS_W + (t % 16) * 8;
 			uint32_t *cut = dst + 128 * BG_ATLAS_W;   /* same tile in the bottom half, colour 0 see-through */
-			for (int x = 0; x < 8; x++) { dst[x] = pal[p][px[x]]; cut[x] = px[x] ? pal[p][px[x]] : 0; }
+			for (int x = 0; x < 8; x++) {
+				dst[x] = pal[p][px[x]];
+				/* cut-outs (grass blades) are lifted 15% toward the palette's light colour,
+				 * so they stand out from the darker tree crowns and the ground */
+				cut[x] = px[x] ? lighten(pal[p][px[x]], pal[p][0], 0.15f) : 0;
+			}
 		}
 	}
 }
